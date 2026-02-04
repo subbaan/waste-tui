@@ -1,0 +1,28 @@
+# Build artifacts
+tui/build/
+*.o
+*.a
+waste-tui
+
+# IDE/Editor
+.cache/
+.claude/
+.vscode/
+*.swp
+*~
+.idea/
+*.sublime-*
+compile_commands.json
+
+# Private keys and config (users generate their own)
+*.pr0
+*.pr3
+*.pr4
+*.wastekey
+
+# Debug logs
+log.txt
+
+# OS files
+.DS_Store
+Thumbs.db
