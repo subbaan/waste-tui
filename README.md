@@ -45,7 +45,7 @@ Requires CMake 3.14+ and a C++17 compiler.
 ```bash
 cd tui/build
 cmake ..
-make -j4
+make -j$(nproc)
 ./waste-tui
 ```
 

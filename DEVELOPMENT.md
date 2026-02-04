@@ -23,7 +23,7 @@ WASTE is a decentralized, encrypted P2P file sharing and chat application (circa
 ## Build (TUI)
 
 ```bash
-cd tui/build && cmake .. && make -j4 && ./waste-tui
+cd tui/build && cmake .. && make -j$(nproc) && ./waste-tui
 ```
 
 ## Key Files
