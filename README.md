@@ -37,6 +37,7 @@ This project revives WASTE with a modern Linux TUI client built using [FTXUI](ht
 - Multiple simultaneous transfers may have issues
 - Ports > 32767 may fail (protocol uses `short`)
 - Real peer file counts not yet implemented
+- In real terms, this is ALPHA quality.
 
 ## Build
 
@@ -170,3 +171,4 @@ GPL v2 - See [LICENSE](LICENSE) for details.
 
 Original WASTE code: Copyright (C) 2003 Nullsoft, Inc.
 TUI client and Linux fixes: Copyright (C) 2024-2026 Contributors
+
