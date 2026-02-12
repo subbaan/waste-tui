@@ -89,6 +89,14 @@ public:
     int getListenPort() const;
     void setNetworkName(const std::string& name);
     std::string getNetworkName() const;
+    void setAcceptIncoming(bool accept);
+    bool getAcceptIncoming() const;
+    void setThrottleUpload(bool enabled, int kbps);
+    void setThrottleDownload(bool enabled, int kbps);
+    bool getThrottleUploadEnabled() const;
+    bool getThrottleDownloadEnabled() const;
+    int getThrottleUploadKBps() const;
+    int getThrottleDownloadKBps() const;
 
     // Config file persistence
     bool loadConfig(const std::string& configDir = "");
@@ -111,6 +119,7 @@ public:
     std::function<void(const std::string& room, const std::string& user, bool joined)> onUserPresence;
 
     std::function<void(const std::string& peer, const std::vector<BrowseEntry>&)> onBrowseResults;
+    std::function<void(const std::string& address, const std::string& nickname)> onPeerNicknameChanged;
 
     std::function<void(const NetworkStats&)> onNetworkStatsUpdated;
 

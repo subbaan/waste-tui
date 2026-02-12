@@ -22,18 +22,19 @@ This project revives WASTE with a modern Linux TUI client built using [FTXUI](ht
 
 ## Current Status
 
-**Version**: 1.8.1
+**Version**: 1.9.2
 
 ### Working
 - Peer connections via encrypted WASTE protocol
 - Chat messaging (send/receive in channels)
+- Direct messages (private peer-to-peer chat)
+- Clickable URLs in chat messages (OSC 8 hyperlinks)
 - Basic file transfers (downloads and uploads with progress)
 - Key management (generate, import, export keys)
 - Local and remote file search
 - File database scanning and sharing
 
-### Not Working / Limitations
-- Direct messages (only channel chat works)
+### Limitations
 - Multiple simultaneous transfers may have issues
 - Ports > 32767 may fail (protocol uses `short`)
 - Real peer file counts not yet implemented
@@ -103,7 +104,7 @@ Send your `.wastekey` file to your friend through any secure method:
 3. Enter your friend's IP address and port (default: 4001)
 4. The connection should establish (both users need to have completed steps 1-4)
 
-Once connected, you can chat (F4), search files (F2), and transfer files (F3).
+Once connected, you can chat (F4), send direct messages, search files (F2), and transfer files (F3).
 
 ### Key Files Reference
 
@@ -135,6 +136,13 @@ To add peers, use the Network view (F1) and press **a** to add a peer address.
 - `a` - Add item
 - `d` - Delete item
 - `?` - Help
+
+**Chat view:**
+- `Enter` - Send message
+- `↑`/`↓` or `j`/`k` - Navigate rooms (when input empty)
+- `J` - Join a channel
+- `d` - Start a direct message
+- `l` - Leave room
 
 **Keys view:**
 - `Tab` - Switch between trusted/pending tabs

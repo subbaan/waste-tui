@@ -92,9 +92,11 @@ struct ChatRoom {
 
 // File browser entry
 struct BrowseEntry {
-    std::string name;
+    std::string name;       // Display name (filename or directory name at current level)
+    std::string fullPath;   // Full relative path from peer's file list
     bool isDirectory;
     uint64_t size;
+    int fileId = -1;  // Remote file database index (for downloads)
 };
 
 // Shared directory
@@ -173,9 +175,13 @@ public:
     // Browse
     std::string browsePeer() const { return browsePeer_; }
     void setBrowsePeer(const std::string& peer) { browsePeer_ = peer; }
+    std::string browsePeerGuid() const { return browsePeerGuid_; }
+    void setBrowsePeerGuid(const std::string& guid) { browsePeerGuid_ = guid; }
     std::string browsePath() const { return browsePath_; }
     void setBrowsePath(const std::string& path) { browsePath_ = path; }
     std::vector<BrowseEntry>& browseEntries() { return browseEntries_; }
+    std::vector<BrowseEntry>& rawBrowseEntries() { return rawBrowseEntries_; }
+    void rebuildBrowseEntries();  // Rebuild browseEntries_ from rawBrowseEntries_ for current path
     int selectedBrowseIndex() const { return selectedBrowseIndex_; }
 
     // Keys
@@ -194,8 +200,6 @@ public:
     // Settings values
     int listenPort() const { return listenPort_; }
     void setListenPort(int port) { listenPort_ = port; }
-    int maxConnections() const { return maxConnections_; }
-    void setMaxConnections(int max) { maxConnections_ = max; }
     int uploadLimitKBps() const { return uploadLimitKBps_; }
     void setUploadLimitKBps(int limit) { uploadLimitKBps_ = limit; }
     int downloadLimitKBps() const { return downloadLimitKBps_; }
@@ -249,14 +253,15 @@ private:
 
     // Browse
     std::string browsePeer_;
+    std::string browsePeerGuid_;
     std::string browsePath_ = "/";
     std::vector<BrowseEntry> browseEntries_;
+    std::vector<BrowseEntry> rawBrowseEntries_;  // All entries with full paths from initial browse
     int selectedBrowseIndex_ = 0;
 
     // Settings
     SettingsSection settingsSection_ = SettingsSection::Network;
     int listenPort_ = 4001;
-    int maxConnections_ = 32;
     int uploadLimitKBps_ = 128;
     int downloadLimitKBps_ = 0;
     bool limitUpload_ = true;

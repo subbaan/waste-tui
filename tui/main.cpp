@@ -2,6 +2,8 @@
 #include <iostream>
 #include <csignal>
 #include <cstring>
+#include <termios.h>
+#include <unistd.h>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -140,11 +142,11 @@ int main(int argc, char* argv[]) {
             demoMode = true;
         }
         if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
-            std::cout << "waste-tui v1.8.1\n";
+            std::cout << "waste-tui v1.10.0\n";
             return 0;
         }
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            std::cout << "WASTE TUI v1.8.1 - Terminal User Interface for WASTE P2P\n\n";
+            std::cout << "WASTE TUI v1.10.0 - Terminal User Interface for WASTE P2P\n\n";
             std::cout << "Usage: waste-tui [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  -v, --version  Show version\n";
@@ -307,6 +309,15 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Failed to initialize WASTE core\n";
                     return 1;
                 }
+            }
+        }
+
+        // Disable XON/XOFF flow control so Ctrl+Q and Ctrl+S reach the app
+        {
+            struct termios tios;
+            if (tcgetattr(STDIN_FILENO, &tios) == 0) {
+                tios.c_iflag &= ~(IXON | IXOFF);
+                tcsetattr(STDIN_FILENO, TCSANOW, &tios);
             }
         }
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(waste-tui
-    VERSION 1.8.1
+    VERSION 1.10.0
     DESCRIPTION "WASTE P2P Client - TUI Interface"
     LANGUAGES CXX C
 )

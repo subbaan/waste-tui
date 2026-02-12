@@ -91,6 +91,7 @@ private:
     std::string modalPortInput_;
     std::string modalRoomInput_;
     std::string modalPathInput_;
+    std::string modalDmPeerInput_;
 
     // For confirm disconnect modal
     std::string disconnectPeerName_;

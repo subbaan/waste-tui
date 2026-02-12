@@ -114,11 +114,31 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
 
     // Handle different message types
     switch (message->message_type) {
-        case MESSAGE_CHAT:
         case MESSAGE_CHAT_REPLY:
+            // Chat reply - contains only the replying peer's nickname
+            debug_printf("[CHAT_REPLY] Received (len=%d, data=%p)\n",
+                message->message_length, (void*)message->data);
+
+            if (message->data && message->message_length > 0) {
+                C_MessageChatReply repl(message->data);
+                char *n = repl.getnick();
+                if (n && n[0] && n[0] != '.' && strlen(n) < 24) {
+                    // Update peer nickname from chat reply
+                    if (cn && g_waste_core_instance) {
+                        struct in_addr addr;
+                        addr.s_addr = cn->get_remote();
+                        std::string peerAddr = inet_ntoa(addr);
+                        debug_printf("[CHAT_REPLY] Got nick '%s' from peer %s\n",
+                                     n, peerAddr.c_str());
+                        g_waste_core_instance->updatePeerNickname(peerAddr, n);
+                    }
+                }
+            }
+            break;
+
+        case MESSAGE_CHAT:
             // Chat message received - extract and forward to TUI
-            debug_printf("[CHAT] Received %s (len=%d, data=%p)\n",
-                message->message_type == MESSAGE_CHAT ? "MESSAGE_CHAT" : "MESSAGE_CHAT_REPLY",
+            debug_printf("[CHAT] Received MESSAGE_CHAT (len=%d, data=%p)\n",
                 message->message_length, (void*)message->data);
 
             if (message->data && message->message_length > 0) {
@@ -130,6 +150,15 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
 
                 debug_printf("[CHAT] Parsed: src='%s' dest='%s' content='%s'\n",
                     src.c_str(), dest.c_str(), chatStr.c_str());
+
+                // Update peer nickname from chat source
+                if (!src.empty() && src[0] != '.' && src.length() < 24 &&
+                    cn && g_waste_core_instance) {
+                    struct in_addr addr;
+                    addr.s_addr = cn->get_remote();
+                    std::string peerAddr = inet_ntoa(addr);
+                    g_waste_core_instance->updatePeerNickname(peerAddr, src);
+                }
 
                 // Handle user presence commands
                 if (chatStr.length() > 6 && chatStr.substr(0, 6) == "/nick/") {
@@ -188,11 +217,35 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
                     // Regular chat message - forward to TUI
                     if (g_waste_core_instance->onChatMessage) {
                         waste::ChatMessage msg;
-                        msg.room = dest;
                         msg.sender = src;
                         msg.content = chatStr;
                         msg.timestamp = std::chrono::system_clock::now();
                         msg.isSystem = false;
+
+                        // Check for direct message (dest starts with @)
+                        if (dest.length() > 1 && dest[0] == '@') {
+                            std::string targetNick = dest.substr(1);
+                            std::string myNick = g_regnick[0] ? g_regnick : "";
+
+                            // Only show DM if addressed to us or sent by us
+                            if (!myNick.empty() && targetNick != myNick && src != myNick) {
+                                debug_printf("[CHAT] DM not for us: target='%s' us='%s'\n",
+                                    targetNick.c_str(), myNick.c_str());
+                                break;
+                            }
+
+                            // Normalize room name: always use the other person's nick
+                            if (src == myNick) {
+                                msg.room = "@" + targetNick;
+                            } else {
+                                msg.room = "@" + src;
+                            }
+
+                            debug_printf("[CHAT] DM: from='%s' to='%s' room='%s'\n",
+                                src.c_str(), targetNick.c_str(), msg.room.c_str());
+                        } else {
+                            msg.room = dest;
+                        }
 
                         // Check for action messages (/me)
                         if (chatStr.length() > 4 && chatStr.substr(0, 4) == "/me ") {
@@ -208,8 +261,8 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
                     }
                 }
 
-                // Send reply if this is a direct chat (MESSAGE_CHAT, not REPLY)
-                if (message->message_type == MESSAGE_CHAT && g_regnick[0]) {
+                // Send reply with our nickname
+                if (g_regnick[0]) {
                     C_MessageChatReply rep;
                     rep.setnick(g_regnick);
 
@@ -226,8 +279,26 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
             break;
 
         case MESSAGE_PING:
-            // Ping received - handled by netkern for network discovery
-            break;
+        {
+            // Parse ping to extract peer nickname
+            C_MessagePing rep(message->data);
+
+            // Extract nickname from ping and update peer
+            if (rep.m_nick[0] && rep.m_nick[0] != '#' && rep.m_nick[0] != '&' &&
+                rep.m_nick[0] != '.' && strlen(rep.m_nick) < 24)
+            {
+                // Map to peer address via the connection that delivered this message
+                if (cn && g_waste_core_instance) {
+                    struct in_addr addr;
+                    addr.s_addr = cn->get_remote();
+                    std::string peerAddr = inet_ntoa(addr);
+                    debug_printf("[PING] Got nick '%s' from peer %s\n",
+                                 rep.m_nick, peerAddr.c_str());
+                    g_waste_core_instance->updatePeerNickname(peerAddr, rep.m_nick);
+                }
+            }
+        }
+        break;
 
         case MESSAGE_SEARCH:
             // Search request received - respond with local file matches
@@ -278,23 +349,24 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
                                         i, id, filename, metadata, sizeLow, sizeHigh);
                             waste::BrowseEntry entry;
 
-                            // Extract just the filename from the path
-                            std::string fullPath = filename;
-                            size_t lastSlash = fullPath.rfind('/');
-                            if (lastSlash != std::string::npos) {
-                                entry.name = fullPath.substr(lastSlash + 1);
-                            } else {
-                                entry.name = fullPath;
+                            // WASTE returns entry names for the current directory level
+                            // (e.g., "Music", "song.mp3" — not full paths)
+                            std::string entryName = filename;
+
+                            // Strip trailing slash if present
+                            if (!entryName.empty() && entryName.back() == '/') {
+                                entryName = entryName.substr(0, entryName.length() - 1);
                             }
 
-                            // Check if it's a directory (ends with / or size is 0 with directory marker)
-                            entry.isDirectory = (!entry.name.empty() && entry.name.back() == '/') ||
-                                               (sizeLow == 0 && sizeHigh == 0 && strlen(metadata) == 0);
-                            if (entry.isDirectory && !entry.name.empty() && entry.name.back() == '/') {
-                                entry.name = entry.name.substr(0, entry.name.length() - 1);
-                            }
+                            entry.name = entryName;
+                            entry.fullPath = entryName;
+
+                            // WASTE marks directories with metadata "Directory" and id=-1
+                            entry.isDirectory = (id == -1) ||
+                                               (strcmp(metadata, "Directory") == 0);
 
                             entry.size = ((uint64_t)sizeHigh << 32) | (uint64_t)(unsigned int)sizeLow;
+                            entry.fileId = id;  // v_index for downloads (-1 for dirs)
 
                             if (!entry.name.empty()) {
                                 entries.push_back(entry);
@@ -309,9 +381,15 @@ void main_MsgCallback(T_Message *message, C_MessageQueueList *_this, C_Connectio
                     debug_printf("[BROWSE] Calling onBrowseResults: peer=%s, entries=%zu\n",
                                 guidStr, entries.size());
                     g_waste_core_instance->onBrowseResults(guidStr, entries);
-                } else {
-                    // Regular search results
-                    int numItems = reply.get_numitems();
+
+                    // Clear browse mode so subsequent SEARCH_REPLYs go to search handler
+                    {
+                        std::lock_guard<std::mutex> lock(g_browse_mutex);
+                        g_browse_path.clear();
+                    }
+                } else if (g_last_scanid_used &&
+                           !memcmp(&g_last_scanid, &message->message_guid, sizeof(T_GUID))) {
+                    // Regular search results - only accept if GUID matches our active search
                     for (int i = 0; i < numItems; i++) {
                         int id;
                         char filename[SEARCHREPLY_MAX_FILESIZE];
@@ -765,29 +843,28 @@ void WasteCore::removeKey(int index, bool isPending) {
 }
 
 void WasteCore::updatePeerNickname(const std::string& address, const std::string& nickname) {
+    // Note: This is called from main_MsgCallback which runs inside eventLoop's
+    // mutex_ lock (eventLoop -> processMessages -> g_mql->run -> main_MsgCallback).
+    // Do NOT acquire mutex_ here - it would deadlock since std::mutex is non-recursive.
+    // The caller (eventLoop) already holds the lock.
     int foundIndex = -1;
-    ConnectionStatus foundStatus = ConnectionStatus::Connecting;
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!impl_) return;
+    if (!impl_) return;
 
-        for (size_t i = 0; i < impl_->peers.size(); i++) {
-            auto& peer = impl_->peers[i];
-            if (peer.address == address && peer.nickname != nickname) {
-                peer.nickname = nickname;
-                foundIndex = i;
-                foundStatus = peer.status;
-                debug_printf("[PING] Updated peer %s nickname to '%s'\n",
-                             address.c_str(), nickname.c_str());
-                break;
-            }
+    for (size_t i = 0; i < impl_->peers.size(); i++) {
+        auto& peer = impl_->peers[i];
+        if (peer.address == address && peer.nickname != nickname) {
+            peer.nickname = nickname;
+            foundIndex = i;
+            debug_printf("[PING] Updated peer %s nickname to '%s'\n",
+                         address.c_str(), nickname.c_str());
+            break;
         }
     }
 
-    // Notify UI outside of lock to avoid deadlock
-    if (foundIndex >= 0 && onPeerStatusChanged) {
-        onPeerStatusChanged(foundIndex, foundStatus, "");
+    // Notify UI - post() and refresh() are thread-safe and don't acquire mutex_
+    if (foundIndex >= 0 && onPeerNicknameChanged) {
+        onPeerNicknameChanged(address, nickname);
     }
 }
 
@@ -1856,11 +1933,12 @@ void WasteCore::search(const std::string& query) {
             msg.message_type = MESSAGE_SEARCH;
             msg.message_length = msg.data->GetLength();
 
+            g_mql->send(&msg);
+
             // Store the search GUID for tracking replies
+            // NOTE: Must be AFTER send() because send() generates the GUID via CreateID128
             memcpy(&g_last_scanid, &msg.message_guid, sizeof(T_GUID));
             g_last_scanid_used = 1;
-
-            g_mql->send(&msg);
         }
     } else if (impl_->simulationMode) {
         // Simulate search results
@@ -1894,7 +1972,15 @@ void WasteCore::search(const std::string& query) {
 
 void WasteCore::cancelSearch() {
     std::lock_guard<std::mutex> lock(mutex_);
-    // TODO: Cancel pending search
+
+    // Clear the scan ID so incoming SEARCH_REPLY messages are ignored
+    g_last_scanid_used = 0;
+    memset(&g_last_scanid, 0, sizeof(g_last_scanid));
+    debug_printf("[SEARCH] Search cancelled\n");
+
+    if (onSearchComplete) {
+        onSearchComplete();
+    }
 }
 
 // Transfers
@@ -2279,8 +2365,24 @@ std::string WasteCore::getNickname() const {
 
 void WasteCore::setListenPort(int port) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (port == listenPort_) return;
     listenPort_ = port;
-    // TODO: Rebind listen socket
+
+    // Rebind listen socket if running
+    if (!impl_->simulationMode && port > 0) {
+        if (g_listen) {
+            delete g_listen;
+            g_listen = nullptr;
+        }
+        g_listen = new C_Listen((short)port);
+        if (g_listen->is_error()) {
+            debug_printf("[NET] Failed to rebind listen socket to port %d\n", port);
+            delete g_listen;
+            g_listen = nullptr;
+        } else {
+            debug_printf("[NET] Rebound listen socket to port %d\n", port);
+        }
+    }
 }
 
 int WasteCore::getListenPort() const {
@@ -2291,12 +2393,87 @@ int WasteCore::getListenPort() const {
 void WasteCore::setNetworkName(const std::string& name) {
     std::lock_guard<std::mutex> lock(mutex_);
     networkName_ = name;
-    // TODO: Update network hash
+
+    // Recompute network hash (used by Blowfish for connection encryption)
+    if (!name.empty()) {
+        SHAify sha;
+        sha.add((unsigned char*)name.c_str(), name.length());
+        sha.final(g_networkhash);
+        g_use_networkhash = 1;
+        debug_printf("[NET] Updated network hash for '%s'\n", name.c_str());
+    } else {
+        memset(g_networkhash, 0, sizeof(g_networkhash));
+        g_use_networkhash = 0;
+        debug_printf("[NET] Cleared network hash (open network)\n");
+    }
 }
 
 std::string WasteCore::getNetworkName() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return networkName_;
+}
+
+void WasteCore::setAcceptIncoming(bool accept) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Bit 1 of g_accept_downloads controls responding to file requests
+    if (accept) {
+        g_accept_downloads |= 1;
+    } else {
+        g_accept_downloads &= ~1;
+    }
+    debug_printf("[NET] Accept incoming: %s (g_accept_downloads=%d)\n",
+                 accept ? "on" : "off", g_accept_downloads);
+}
+
+bool WasteCore::getAcceptIncoming() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (g_accept_downloads & 1) != 0;
+}
+
+void WasteCore::setThrottleUpload(bool enabled, int kbps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (enabled) {
+        g_throttle_flag |= 2;   // Bit 2 = throttle send
+        g_throttle_send = kbps;
+    } else {
+        g_throttle_flag &= ~2;
+        g_throttle_send = 0;
+    }
+    debug_printf("[NET] Upload throttle: %s (%d KB/s, flag=%d)\n",
+                 enabled ? "on" : "off", kbps, g_throttle_flag);
+}
+
+void WasteCore::setThrottleDownload(bool enabled, int kbps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (enabled) {
+        g_throttle_flag |= 1;   // Bit 1 = throttle recv
+        g_throttle_recv = kbps;
+    } else {
+        g_throttle_flag &= ~1;
+        g_throttle_recv = 0;
+    }
+    debug_printf("[NET] Download throttle: %s (%d KB/s, flag=%d)\n",
+                 enabled ? "on" : "off", kbps, g_throttle_flag);
+}
+
+bool WasteCore::getThrottleUploadEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (g_throttle_flag & 2) != 0;
+}
+
+bool WasteCore::getThrottleDownloadEnabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (g_throttle_flag & 1) != 0;
+}
+
+int WasteCore::getThrottleUploadKBps() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return g_throttle_send;
+}
+
+int WasteCore::getThrottleDownloadKBps() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return g_throttle_recv;
 }
 
 bool WasteCore::loadConfig(const std::string& configDir) {
@@ -2346,6 +2523,11 @@ bool WasteCore::loadConfig(const std::string& configDir) {
         networkName_ = netName;
     }
 
+    g_accept_downloads = cfg.ReadInt((char*)"downloadflags", 7);
+    g_throttle_flag = cfg.ReadInt((char*)"throttleflag", 0);
+    g_throttle_send = cfg.ReadInt((char*)"throttlesend", 128);
+    g_throttle_recv = cfg.ReadInt((char*)"throttlerecv", 128);
+
     // Load shared directories (semicolon-separated)
     char* sharedDirsStr = cfg.ReadString((char*)"shared_dirs", (char*)"");
     if (sharedDirsStr && sharedDirsStr[0]) {
@@ -2385,6 +2567,10 @@ bool WasteCore::saveConfig() {
     cfg.WriteString((char*)"nickname", (char*)nickname_.c_str());
     cfg.WriteInt((char*)"port", listenPort_);
     cfg.WriteString((char*)"network", (char*)networkName_.c_str());
+    cfg.WriteInt((char*)"downloadflags", g_accept_downloads);
+    cfg.WriteInt((char*)"throttleflag", g_throttle_flag);
+    cfg.WriteInt((char*)"throttlesend", g_throttle_send);
+    cfg.WriteInt((char*)"throttlerecv", g_throttle_recv);
 
     // Save shared directories (semicolon-separated)
     std::string sharedDirsStr;

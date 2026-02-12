@@ -22,6 +22,21 @@ using namespace ftxui;
 
 namespace {
 
+constexpr char CTRL_A = '\x01';
+constexpr char CTRL_B = '\x02';
+constexpr char CTRL_D = '\x04';
+constexpr char CTRL_E = '\x05';
+constexpr char CTRL_F = '\x06';
+constexpr char CTRL_L = '\x0C';
+constexpr char CTRL_N = '\x0E';
+constexpr char CTRL_O = '\x0F';
+constexpr char CTRL_P = '\x10';
+constexpr char CTRL_Q = '\x11';
+constexpr char CTRL_R = '\x12';
+constexpr char CTRL_S = '\x13';
+constexpr char CTRL_T = '\x14';
+constexpr char CTRL_X = '\x18';
+
 std::string formatTime() {
     auto now = std::chrono::system_clock::now();
     auto time = std::chrono::system_clock::to_time_t(now);
@@ -87,6 +102,77 @@ std::string transferStatusStr(TransferStatus status) {
     return "?";
 }
 
+// Render message content with clickable URLs
+// Detects http://, https://, ftp://, and www. prefixes
+Element renderMessageContent(const std::string& content) {
+    Elements parts;
+    size_t pos = 0;
+    size_t len = content.length();
+
+    while (pos < len) {
+        // Find the next URL
+        size_t urlStart = std::string::npos;
+        std::string urlPrefix;
+
+        static const std::vector<std::string> prefixes = {
+            "https://", "http://", "ftp://", "www."
+        };
+
+        for (const auto& prefix : prefixes) {
+            size_t found = content.find(prefix, pos);
+            if (found < urlStart) {
+                urlStart = found;
+                urlPrefix = prefix;
+            }
+        }
+
+        if (urlStart == std::string::npos) {
+            // No more URLs, emit remaining text
+            parts.push_back(text(content.substr(pos)));
+            break;
+        }
+
+        // Emit text before the URL
+        if (urlStart > pos) {
+            parts.push_back(text(content.substr(pos, urlStart - pos)));
+        }
+
+        // Find end of URL (whitespace or certain punctuation)
+        size_t urlEnd = urlStart + urlPrefix.length();
+        while (urlEnd < len && content[urlEnd] != ' ' && content[urlEnd] != '\t' &&
+               content[urlEnd] != '>' && content[urlEnd] != '"' && content[urlEnd] != '\n') {
+            urlEnd++;
+        }
+        // Strip trailing punctuation that's likely not part of the URL
+        while (urlEnd > urlStart + urlPrefix.length() &&
+               (content[urlEnd - 1] == '.' || content[urlEnd - 1] == ',' ||
+                content[urlEnd - 1] == ')' || content[urlEnd - 1] == ']')) {
+            urlEnd--;
+        }
+
+        std::string url = content.substr(urlStart, urlEnd - urlStart);
+        std::string linkUrl = url;
+        // Auto-prefix www. with https://
+        if (url.substr(0, 4) == "www.") {
+            linkUrl = "https://" + url;
+        }
+
+        parts.push_back(
+            text(url) | underlined | color(Color::Blue) | hyperlink(linkUrl)
+        );
+
+        pos = urlEnd;
+    }
+
+    if (parts.empty()) {
+        return text("");
+    }
+    if (parts.size() == 1) {
+        return parts[0];
+    }
+    return hbox(parts);
+}
+
 }  // namespace
 
 App::App() : screen_(ScreenInteractive::Fullscreen()) {
@@ -131,8 +217,13 @@ bool App::initializeCore() {
         }
         std::string netName = core_->getNetworkName();
         if (!netName.empty()) {
-            state_.setNetworkHash(netName);  // Use networkHash to store network name
+            state_.setNetworkHash(netName);
         }
+        state_.setAcceptIncoming(core_->getAcceptIncoming());
+        state_.setLimitUpload(core_->getThrottleUploadEnabled());
+        state_.setLimitDownload(core_->getThrottleDownloadEnabled());
+        state_.setUploadLimitKBps(core_->getThrottleUploadKBps() > 0 ? core_->getThrottleUploadKBps() : 128);
+        state_.setDownloadLimitKBps(core_->getThrottleDownloadKBps() > 0 ? core_->getThrottleDownloadKBps() : 128);
 
         // Sync shared directories
         auto sharedDirs = core_->getSharedDirectories();
@@ -219,11 +310,7 @@ void App::setupCoreCallbacks() {
                     peers[i].status = status;
                     peers[i].errorMsg = error;
                     if (status == ConnectionStatus::Online) {
-                        peers[i].filesShared = 100 + (rand() % 2000);
-                        if (peers[i].nickname.empty()) {
-                            static const char* names[] = {"peer", "user", "node", "friend"};
-                            peers[i].nickname = std::string(names[rand() % 4]) + std::to_string(rand() % 100);
-                        }
+                        peers[i].connectedAt = std::chrono::steady_clock::now();
                     }
                     break;
                 }
@@ -254,10 +341,10 @@ void App::setupCoreCallbacks() {
     };
 
     // Browse results (peer file listing)
-    core_->onBrowseResults = [this](const std::string& peer, const std::vector<BrowseEntry>& entries) {
-        post([this, peer, entries] {
+    core_->onBrowseResults = [this](const std::string& peerGuid, const std::vector<BrowseEntry>& entries) {
+        post([this, peerGuid, entries] {
             std::lock_guard<std::mutex> lock(state_.mutex());
-            // Clear existing entries and add new ones
+            state_.setBrowsePeerGuid(peerGuid);
             state_.browseEntries().clear();
             for (const auto& entry : entries) {
                 state_.browseEntries().push_back(entry);
@@ -350,6 +437,20 @@ void App::setupCoreCallbacks() {
         refresh();
     };
 
+    // Peer nickname learned from protocol (ping, chat reply, etc.)
+    core_->onPeerNicknameChanged = [this](const std::string& address, const std::string& nickname) {
+        post([this, address, nickname] {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            for (auto& peer : state_.peers()) {
+                if (peer.address == address) {
+                    peer.nickname = nickname;
+                    break;
+                }
+            }
+        });
+        refresh();
+    };
+
     // Network stats
     core_->onNetworkStatsUpdated = [this](const NetworkStats& stats) {
         post([this, stats] {
@@ -384,31 +485,51 @@ void App::refreshBrowserEntries() {
     namespace fs = std::filesystem;
     browserEntries_.clear();
 
-    try {
-        // Add parent directory option if not at root
-        if (browserCurrentPath_ != "/") {
-            browserEntries_.push_back("..");
-        }
+    // Add parent directory option if not at root
+    if (browserCurrentPath_ != "/") {
+        browserEntries_.push_back("..");
+    }
 
-        // List directories only (for folder selection)
-        std::vector<std::string> dirs;
-        for (const auto& entry : fs::directory_iterator(browserCurrentPath_)) {
-            if (entry.is_directory()) {
-                std::string name = entry.path().filename().string();
-                // Skip hidden directories
-                if (!name.empty() && name[0] != '.') {
-                    dirs.push_back(name);
-                }
+    // List directories (for folder selection)
+    std::vector<std::string> dirs;
+    std::vector<std::string> hiddenDirs;
+
+    try {
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(
+                browserCurrentPath_,
+                fs::directory_options::skip_permission_denied, ec)) {
+            // Use error_code overload to avoid throwing on individual entries
+            std::error_code entryEc;
+            bool isDir = entry.is_directory(entryEc);
+            // Also check symlinks pointing to directories
+            if (!isDir && !entryEc) {
+                isDir = entry.is_symlink(entryEc) &&
+                        fs::is_directory(entry.path(), entryEc);
+            }
+            if (!isDir) continue;
+
+            std::string name = entry.path().filename().string();
+            if (name.empty()) continue;
+
+            if (name[0] == '.') {
+                hiddenDirs.push_back(name);
+            } else {
+                dirs.push_back(name);
             }
         }
-
-        // Sort alphabetically
-        std::sort(dirs.begin(), dirs.end());
-        for (const auto& d : dirs) {
-            browserEntries_.push_back(d);
-        }
     } catch (...) {
-        // On error, just show parent option if available
+        // directory_iterator constructor failed - leave dirs empty
+    }
+
+    // Sort and add: regular dirs first, then hidden dirs
+    std::sort(dirs.begin(), dirs.end());
+    std::sort(hiddenDirs.begin(), hiddenDirs.end());
+    for (const auto& d : dirs) {
+        browserEntries_.push_back(d);
+    }
+    for (const auto& d : hiddenDirs) {
+        browserEntries_.push_back(d);
     }
 }
 
@@ -423,7 +544,7 @@ Element App::buildStatusBar() {
     }
 
     Elements statusItems = {
-        text(" WASTE v1.7.8 ") | bold | color(Color::Cyan),
+        text(" WASTE v1.9.8 ") | bold | color(Color::Cyan),
         separator(),
         text(" Net: " + std::to_string(stats.connectedPeers) + " peers "),
         separator(),
@@ -472,25 +593,25 @@ Element App::buildFooter() {
     } else {
         switch (state_.currentView()) {
             case View::Network:
-                hints = "a:Add  d:Disconnect  b:Browse  c:Chat  r:Refresh  ?:Help";
+                hints = "^A:Add  ^D:Disconnect  ^B:Browse  ^N:Chat  ^R:Retry  ?:Help";
                 break;
             case View::Search:
-                hints = "/:Search  d:Download  i:Info  b:Browse user  s:Sort  ?:Help";
+                hints = "/:Search  Esc:Clear  ^D:Download  ^B:Browse user  ?:Help";
                 break;
             case View::Transfers:
-                hints = "p:Pause  r:Resume  c:Cancel  x:Clear done  ?:Help";
+                hints = "^P:Pause  ^R:Resume  ^D:Cancel  ^X:Clear done  ?:Help";
                 break;
             case View::Chat:
-                hints = "Tab:Switch focus  Enter:Send  j:Join room  l:Leave  ?:Help";
+                hints = "Tab:Rooms  Enter:Send  ^O:Join  ^N:DM  ^L:Leave  F7:Help";
                 break;
             case View::Browse:
-                hints = "Enter:Open  Bksp:Up  d:Download  D:Download all  Esc:Back  ?:Help";
+                hints = "Enter/l:Open  h/Bksp:Up  ^D:Download  Esc:Back  ?:Help";
                 break;
             case View::Keys:
-                hints = "Tab:Switch lists  t:Trust  d:Delete  i:Import  e:Export  ?:Help";
+                hints = "Tab:Lists  ^T:Trust  ^D:Delete  ^F:Import  ^E:Export  ?:Help";
                 break;
             case View::Settings:
-                hints = "↑↓:Section  Tab:Fields  Space:Toggle  a:Add  d:Delete  ?:Help";
+                hints = "arrows:Nav  Space:Toggle  ^A:Add  ^D:Delete  ^S:Save  ?:Help";
                 break;
         }
     }
@@ -498,7 +619,7 @@ Element App::buildFooter() {
     return hbox({
         text(" " + hints + " ") | dim,
         filler(),
-        text(" F10:Quit ") | dim
+        text(" ^Q:Quit ") | dim
     }) | bgcolor(Color::GrayDark);
 }
 
@@ -510,76 +631,74 @@ Element App::buildHelpOverlay() {
 
     // Global bindings
     bindings.push_back({"F1-F6", "Switch views"});
-    bindings.push_back({"F10/Ctrl+D", "Quit"});
+    bindings.push_back({"Ctrl+Q/F10", "Quit"});
     bindings.push_back({"Esc", "Close/Back"});
-    bindings.push_back({"?", "Toggle help"});
+    bindings.push_back({"?/F7", "Toggle help"});
     bindings.push_back({"", ""});
 
     switch (state_.currentView()) {
         case View::Network:
             title = "Network View Help";
             bindings.push_back({"j/k or ↑/↓", "Navigate peers"});
-            bindings.push_back({"a", "Add connection"});
-            bindings.push_back({"d", "Disconnect peer"});
-            bindings.push_back({"b", "Browse peer's files"});
-            bindings.push_back({"c", "Chat with peer"});
-            bindings.push_back({"r", "Retry failed connection"});
+            bindings.push_back({"Ctrl+A", "Add connection"});
+            bindings.push_back({"Ctrl+D", "Disconnect peer"});
+            bindings.push_back({"Ctrl+B", "Browse peer's files"});
+            bindings.push_back({"Ctrl+N", "Chat with peer"});
+            bindings.push_back({"Ctrl+R", "Retry failed connection"});
             break;
         case View::Search:
             title = "Search View Help";
             bindings.push_back({"Enter", "Execute search"});
-            bindings.push_back({"/ or n", "Focus search input"});
+            bindings.push_back({"Escape", "Cancel search / clear results"});
+            bindings.push_back({"/ or Ctrl+N", "Focus search input"});
             bindings.push_back({"j/k or ↑/↓", "Navigate results"});
-            bindings.push_back({"d", "Download selected"});
-            bindings.push_back({"i", "Show file info"});
-            bindings.push_back({"b", "Browse file owner"});
-            bindings.push_back({"s", "Cycle sort column"});
-            bindings.push_back({"S", "Reverse sort"});
+            bindings.push_back({"Ctrl+D", "Download selected"});
+            bindings.push_back({"Ctrl+B", "Browse file owner"});
             break;
         case View::Transfers:
             title = "Transfers View Help";
             bindings.push_back({"j/k or ↑/↓", "Navigate transfers"});
             bindings.push_back({"Tab", "Switch Download/Upload"});
-            bindings.push_back({"p", "Pause transfer"});
-            bindings.push_back({"r", "Resume transfer"});
-            bindings.push_back({"c", "Cancel transfer"});
-            bindings.push_back({"x", "Clear completed"});
+            bindings.push_back({"Ctrl+P", "Pause transfer"});
+            bindings.push_back({"Ctrl+R", "Resume transfer"});
+            bindings.push_back({"Ctrl+D", "Cancel transfer"});
+            bindings.push_back({"Ctrl+X", "Clear completed"});
             break;
         case View::Chat:
             title = "Chat View Help";
             bindings.push_back({"Tab", "Switch room list/input"});
             bindings.push_back({"↑/↓", "Navigate rooms"});
-            bindings.push_back({"Enter", "Select room / Send msg"});
+            bindings.push_back({"Enter", "Send message"});
             bindings.push_back({"PgUp/PgDn", "Scroll messages"});
-            bindings.push_back({"j", "Join room"});
-            bindings.push_back({"l", "Leave room"});
+            bindings.push_back({"Ctrl+O", "Join room"});
+            bindings.push_back({"Ctrl+N", "Direct message"});
+            bindings.push_back({"Ctrl+L", "Leave room"});
             break;
         case View::Browse:
             title = "Browse View Help";
             bindings.push_back({"j/k or ↑/↓", "Navigate files"});
-            bindings.push_back({"Enter", "Open folder / Download"});
+            bindings.push_back({"Enter or l", "Open folder / Download"});
             bindings.push_back({"Backspace/h", "Go to parent"});
-            bindings.push_back({"d", "Download selected"});
-            bindings.push_back({"D", "Download all"});
+            bindings.push_back({"Ctrl+D", "Download selected"});
             bindings.push_back({"Esc", "Back to previous"});
             break;
         case View::Keys:
             title = "Keys View Help";
             bindings.push_back({"j/k or ↑/↓", "Navigate keys"});
             bindings.push_back({"Tab", "Switch trusted/pending"});
-            bindings.push_back({"t", "Trust pending key"});
-            bindings.push_back({"d", "Delete selected key"});
-            bindings.push_back({"i", "Import key file"});
-            bindings.push_back({"e", "Export public key"});
+            bindings.push_back({"Ctrl+T", "Trust pending key"});
+            bindings.push_back({"Ctrl+D", "Delete selected key"});
+            bindings.push_back({"Ctrl+F", "Import key file"});
+            bindings.push_back({"Ctrl+E", "Export public key"});
             break;
         case View::Settings:
             title = "Settings View Help";
             bindings.push_back({"↑/↓", "Navigate sections"});
             bindings.push_back({"Tab", "Move between fields"});
             bindings.push_back({"Space/Enter", "Toggle checkbox"});
-            bindings.push_back({"a", "Add (directory/etc)"});
-            bindings.push_back({"d/Del", "Delete selected"});
-            bindings.push_back({"S", "Save settings"});
+            bindings.push_back({"Ctrl+A", "Add (directory/etc)"});
+            bindings.push_back({"Ctrl+D", "Delete selected"});
+            bindings.push_back({"Ctrl+S", "Save settings"});
             break;
     }
 
@@ -632,18 +751,18 @@ bool App::handleGlobalEvent(Event event) {
                             }
                         }
                     } else if (type == "download_confirm") {
-                        // Start download via core (core adds to state via callback)
+                        // Extract download info and start in a background post
+                        // to avoid blocking UI (XferRecv does network I/O)
                         int idx = state_.selectedSearchIndex();
                         auto& results = state_.searchResults();
-                        fprintf(stderr, "[UI] Download confirmed, idx=%d, results=%zu\n",
-                            idx, results.size());
                         if (idx >= 0 && idx < (int)results.size()) {
-                            fprintf(stderr, "[UI] Calling downloadFile: hash='%s' filename='%s'\n",
-                                results[idx].hash.c_str(), results[idx].filename.c_str());
-                            // hash contains GUID:index, filename is in the result
-                            core_->downloadFile(results[idx].hash, results[idx].filename);
-                        } else {
-                            fprintf(stderr, "[UI] Download failed: invalid idx or empty results\n");
+                            std::string hash = results[idx].hash;
+                            std::string filename = results[idx].filename;
+                            post([this, hash, filename] {
+                                if (core_) {
+                                    core_->downloadFile(hash, filename);
+                                }
+                            });
                         }
                     }
                     state_.setShowModal(false);
@@ -657,8 +776,9 @@ bool App::handleGlobalEvent(Event event) {
             }
 
             // Handle input modals (single field)
-            if (type == "join_room" || type == "add_directory") {
-                std::string* inputField = (type == "join_room") ? &modalRoomInput_ : &modalPathInput_;
+            if (type == "join_room" || type == "add_directory" || type == "start_dm") {
+                std::string* inputField = (type == "join_room") ? &modalRoomInput_
+                    : (type == "start_dm") ? &modalDmPeerInput_ : &modalPathInput_;
 
                 if (event == Event::Return) {
                     if (type == "join_room" && !modalRoomInput_.empty()) {
@@ -668,6 +788,33 @@ bool App::handleGlobalEvent(Event event) {
                         room.unreadCount = 0;
                         state_.chatRooms().push_back(room);
                         modalRoomInput_.clear();
+                    } else if (type == "start_dm" && !modalDmPeerInput_.empty()) {
+                        std::string peerNick = modalDmPeerInput_;
+                        std::string dmRoom = "@" + peerNick;
+
+                        // Check if DM room already exists
+                        bool found = false;
+                        int foundIdx = -1;
+                        for (int i = 0; i < (int)state_.chatRooms().size(); i++) {
+                            if (state_.chatRooms()[i].name == dmRoom) {
+                                found = true;
+                                foundIdx = i;
+                                break;
+                            }
+                        }
+
+                        if (!found) {
+                            ChatRoom room;
+                            room.name = dmRoom;
+                            room.isDirect = true;
+                            room.unreadCount = 0;
+                            state_.chatRooms().push_back(room);
+                            foundIdx = state_.chatRooms().size() - 1;
+                        }
+
+                        // Select the DM room
+                        state_.setSelectedRoomIndex(foundIdx);
+                        modalDmPeerInput_.clear();
                     } else if (type == "add_directory" && !modalPathInput_.empty()) {
                         SharedDirectory dir;
                         dir.path = modalPathInput_;
@@ -861,8 +1008,18 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
+    // Chat view: let per-view handler manage all single-character keys
+    // This prevents typing conflicts — per-view handler uses chatInput().empty()
+    // to distinguish navigation mode vs typing mode
+    if (event.is_character()) {
+        std::lock_guard<std::mutex> lock(state_.mutex());
+        if (state_.currentView() == View::Chat) {
+            return false;
+        }
+    }
+
     // Help toggle
-    if (event == Event::Character('?')) {
+    if (event == Event::Character('?') || event == Event::F7) {
         showHelp_ = !showHelp_;
         return true;
     }
@@ -911,9 +1068,9 @@ bool App::handleGlobalEvent(Event event) {
         return true;
     }
 
-    // F10 or Ctrl+D to quit
+    // F10 or Ctrl+Q to quit
     if (event == Event::F10 ||
-        event == Event::Character('\x04')) {  // Ctrl+D
+        event == Event::Character(CTRL_Q)) {
         quit();
         return true;
     }
@@ -928,8 +1085,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'a' key for adding based on current view
-    if (event == Event::Character('a')) {
+    // Handle Ctrl+A for adding based on current view
+    if (event == Event::Character(CTRL_A)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         View view = state_.currentView();
         if (view == View::Network) {
@@ -954,11 +1111,6 @@ bool App::handleGlobalEvent(Event event) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         View view = state_.currentView();
 
-        // Don't intercept 'j' in Chat - let user type it
-        if (event == Event::Character('j') && view == View::Chat) {
-            return false;  // Pass to chat input
-        }
-
         // Settings navigation down
         if (view == View::Settings) {
             if (!settingsFocusContent_) {
@@ -972,9 +1124,9 @@ bool App::handleGlobalEvent(Event event) {
                 // Navigate content items
                 int maxItems = 0;
                 switch (state_.settingsSection()) {
-                    case SettingsSection::Network: maxItems = 5; break;
+                    case SettingsSection::Network: maxItems = 4; break;
                     case SettingsSection::Sharing: maxItems = (int)state_.sharedDirs().size(); break;
-                    case SettingsSection::Identity: maxItems = 1; break;
+                    case SettingsSection::Identity: maxItems = 2; break;
                     case SettingsSection::Interface: maxItems = 0; break;
                 }
                 if (selectedSettingsItem_ < maxItems - 1) {
@@ -1031,11 +1183,6 @@ bool App::handleGlobalEvent(Event event) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         View view = state_.currentView();
 
-        // Don't intercept 'k' in Chat - let user type it
-        if (event == Event::Character('k') && view == View::Chat) {
-            return false;  // Pass to chat input
-        }
-
         // Settings navigation up
         if (view == View::Settings) {
             if (!settingsFocusContent_) {
@@ -1077,76 +1224,87 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'd' key for disconnect/delete
-    if (event == Event::Character('d')) {
-        std::lock_guard<std::mutex> lock(state_.mutex());
-        View view = state_.currentView();
+    // Handle Ctrl+D for disconnect/delete/download/cancel
+    if (event == Event::Character(CTRL_D)) {
+        std::string dlHash, dlFilename;
+        {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            View view = state_.currentView();
 
-        if (view == View::Network) {
-            int idx = state_.selectedPeerIndex();
-            auto& peers = state_.peers();
-            if (idx >= 0 && idx < (int)peers.size()) {
-                disconnectPeerName_ = peers[idx].nickname.empty() ?
-                    peers[idx].address : peers[idx].nickname;
-                state_.setModalType("confirm_disconnect");
-                state_.setShowModal(true);
-            }
-            return true;
-        } else if (view == View::Browse) {
-            // Download selected file
-            int offset = (state_.browsePath() != "/") ? 1 : 0;
-            int idx = state_.selectedBrowseIndex() - offset;
-            auto& entries = state_.browseEntries();
-            if (idx >= 0 && idx < (int)entries.size() && !entries[idx].isDirectory) {
-                // Add to transfers
-                TransferInfo xfer;
-                xfer.id = state_.transfers().size() + 1;
-                xfer.filename = entries[idx].name;
-                xfer.direction = TransferDirection::Download;
-                xfer.status = TransferStatus::Queued;
-                xfer.totalSize = entries[idx].size;
-                xfer.transferred = 0;
-                xfer.speedKBps = 0;
-                xfer.peer = state_.browsePeer();
-                state_.transfers().push_back(xfer);
-            }
-            return true;
-        } else if (view == View::Keys) {
-            // Delete selected key from core
-            bool isPending = state_.showPendingKeys();
-            int idx = state_.selectedKeyIndex();
-            if (core_) {
-                auto keys = isPending ? core_->getPendingKeys() : core_->getTrustedKeys();
-                if (idx >= 0 && idx < (int)keys.size()) {
-                    core_->removeKey(idx, isPending);
-                    // Adjust selection if needed
-                    int newSize = (int)keys.size() - 1;
-                    if (idx >= newSize && newSize > 0) {
-                        state_.setSelectedKeyIndex(newSize - 1);
-                    } else if (newSize == 0) {
-                        state_.setSelectedKeyIndex(0);
+            if (view == View::Network) {
+                int idx = state_.selectedPeerIndex();
+                auto& peers = state_.peers();
+                if (idx >= 0 && idx < (int)peers.size()) {
+                    disconnectPeerName_ = peers[idx].nickname.empty() ?
+                        peers[idx].address : peers[idx].nickname;
+                    state_.setModalType("confirm_disconnect");
+                    state_.setShowModal(true);
+                }
+                return true;
+            } else if (view == View::Browse) {
+                // Extract download info while locked; actual download call is after lock
+                int offset = (state_.browsePath() != "/") ? 1 : 0;
+                int idx = state_.selectedBrowseIndex() - offset;
+                auto& entries = state_.browseEntries();
+                if (idx >= 0 && idx < (int)entries.size() && !entries[idx].isDirectory) {
+                    std::string peerGuid = state_.browsePeerGuid();
+                    int fileId = entries[idx].fileId;
+                    if (!peerGuid.empty() && fileId >= 0) {
+                        dlHash = peerGuid + ":" + std::to_string(fileId);
+                        dlFilename = entries[idx].name;
                     }
                 }
-            }
-            return true;
-        } else if (view == View::Settings &&
-                   state_.settingsSection() == SettingsSection::Sharing &&
-                   settingsFocusContent_) {
-            // Remove selected shared directory
-            int idx = selectedSettingsItem_;
-            auto& dirs = state_.sharedDirs();
-            if (idx >= 0 && idx < (int)dirs.size()) {
-                dirs.erase(dirs.begin() + idx);
+                // Fall through to download outside lock
+            } else if (view == View::Keys) {
+                bool isPending = state_.showPendingKeys();
+                int idx = state_.selectedKeyIndex();
                 if (core_) {
-                    core_->removeSharedDirectory(idx);
+                    auto keys = isPending ? core_->getPendingKeys() : core_->getTrustedKeys();
+                    if (idx >= 0 && idx < (int)keys.size()) {
+                        core_->removeKey(idx, isPending);
+                        int newSize = (int)keys.size() - 1;
+                        if (idx >= newSize && newSize > 0) {
+                            state_.setSelectedKeyIndex(newSize - 1);
+                        } else if (newSize == 0) {
+                            state_.setSelectedKeyIndex(0);
+                        }
+                    }
                 }
-                // Adjust selection
-                if (idx >= (int)dirs.size() && !dirs.empty()) {
-                    selectedSettingsItem_ = dirs.size() - 1;
+                return true;
+            } else if (view == View::Settings &&
+                       state_.settingsSection() == SettingsSection::Sharing &&
+                       settingsFocusContent_) {
+                int idx = selectedSettingsItem_;
+                auto& dirs = state_.sharedDirs();
+                if (idx >= 0 && idx < (int)dirs.size()) {
+                    dirs.erase(dirs.begin() + idx);
+                    if (core_) {
+                        core_->removeSharedDirectory(idx);
+                    }
+                    if (idx >= (int)dirs.size() && !dirs.empty()) {
+                        selectedSettingsItem_ = dirs.size() - 1;
+                    }
                 }
+                return true;
+            } else if (view == View::Transfers) {
+                int idx = state_.selectedTransferIndex();
+                auto& transfers = state_.transfers();
+                if (idx >= 0 && idx < (int)transfers.size()) {
+                    transfers.erase(transfers.begin() + idx);
+                    if (idx > 0 && idx >= (int)transfers.size()) {
+                        state_.setSelectedTransferIndex(idx - 1);
+                    }
+                }
+                return true;
+            } else {
+                return false;
             }
-            return true;
+        } // lock released here
+        // Start download outside lock to avoid blocking UI
+        if (core_ && !dlHash.empty()) {
+            core_->downloadFile(dlHash, dlFilename);
         }
+        return true;
     }
 
     // Handle Tab key for Keys view (switch between trusted/pending)
@@ -1159,8 +1317,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 't' key for trusting a pending key
-    if (event == Event::Character('t')) {
+    // Handle Ctrl+T for trusting a pending key
+    if (event == Event::Character(CTRL_T)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Keys && state_.showPendingKeys()) {
             int idx = state_.selectedKeyIndex();
@@ -1181,8 +1339,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'e' key for exporting public key (Keys view)
-    if (event == Event::Character('e')) {
+    // Handle Ctrl+E for exporting public key (Keys view)
+    if (event == Event::Character(CTRL_E)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Keys) {
             // Pre-fill with default export path
@@ -1195,8 +1353,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'i' key for importing public key (Keys view)
-    if (event == Event::Character('i')) {
+    // Handle Ctrl+F for importing public key (Keys view)
+    if (event == Event::Character(CTRL_F)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Keys) {
             modalPathInput_.clear();
@@ -1208,77 +1366,75 @@ bool App::handleGlobalEvent(Event event) {
 
     // Handle Enter key
     if (event == Event::Return) {
-        std::lock_guard<std::mutex> lock(state_.mutex());
-        View view = state_.currentView();
+        std::string dlHash, dlFilename;
+        {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            View view = state_.currentView();
 
-        if (view == View::Chat) {
-            // Let the chat view's CatchEvent handler handle Enter
-            // (it properly calls core_->sendChatMessage)
-            return false;
-        } else if (view == View::Search) {
-            // Let search view's CatchEvent handle Enter (for searching)
-            // Use 'd' key for download instead
-            return false;
-        } else if (view == View::Browse) {
-            int offset = (state_.browsePath() != "/") ? 1 : 0;
-            int idx = state_.selectedBrowseIndex();
-            std::string peer = state_.browsePeer();
+            if (view == View::Chat) {
+                return false;
+            } else if (view == View::Search) {
+                return false;
+            } else if (view == View::Browse) {
+                int offset = (state_.browsePath() != "/") ? 1 : 0;
+                int idx = state_.selectedBrowseIndex();
+                std::string peer = state_.browsePeer();
 
-            // Handle ".." (parent directory)
-            if (offset > 0 && idx == 0) {
-                std::string path = state_.browsePath();
-                size_t pos = path.rfind('/');
-                std::string newPath;
-                if (pos != std::string::npos && pos > 0) {
-                    newPath = path.substr(0, pos);
-                } else {
-                    newPath = "/";
-                }
-                state_.setBrowsePath(newPath);
-                state_.setSelectedBrowseIndex(0);
-                state_.browseEntries().clear();
-                // Fetch new directory listing
-                if (core_) {
-                    core_->browsePeer(peer, newPath);
-                }
-                return true;
-            }
-
-            // Handle directory/file
-            int entryIdx = idx - offset;
-            auto& entries = state_.browseEntries();
-            if (entryIdx >= 0 && entryIdx < (int)entries.size()) {
-                if (entries[entryIdx].isDirectory) {
-                    std::string newPath = state_.browsePath();
-                    if (newPath != "/") newPath += "/";
-                    newPath += entries[entryIdx].name;
+                // Handle ".." (parent directory)
+                if (offset > 0 && idx == 0) {
+                    std::string path = state_.browsePath();
+                    size_t pos = path.rfind('/');
+                    std::string newPath;
+                    if (pos != std::string::npos && pos > 0) {
+                        newPath = path.substr(0, pos);
+                    } else {
+                        newPath = "/";
+                    }
                     state_.setBrowsePath(newPath);
                     state_.setSelectedBrowseIndex(0);
                     state_.browseEntries().clear();
-                    // Fetch new directory listing
                     if (core_) {
                         core_->browsePeer(peer, newPath);
                     }
-                } else {
-                    // Download file
-                    TransferInfo xfer;
-                    xfer.id = state_.transfers().size() + 1;
-                    xfer.filename = entries[entryIdx].name;
-                    xfer.direction = TransferDirection::Download;
-                    xfer.status = TransferStatus::Queued;
-                    xfer.totalSize = entries[entryIdx].size;
-                    xfer.transferred = 0;
-                    xfer.speedKBps = 0;
-                    xfer.peer = peer;
-                    state_.transfers().push_back(xfer);
+                    return true;
                 }
+
+                // Handle directory/file
+                int entryIdx = idx - offset;
+                auto& entries = state_.browseEntries();
+                if (entryIdx >= 0 && entryIdx < (int)entries.size()) {
+                    if (entries[entryIdx].isDirectory) {
+                        // Enter directory — request listing from peer
+                        std::string newPath = state_.browsePath();
+                        if (newPath != "/") newPath += "/";
+                        newPath += entries[entryIdx].name;
+                        state_.setBrowsePath(newPath);
+                        state_.setSelectedBrowseIndex(0);
+                        state_.browseEntries().clear();
+                        if (core_) {
+                            core_->browsePeer(peer, newPath);
+                        }
+                    } else {
+                        // Extract download info; call outside lock
+                        std::string peerGuid = state_.browsePeerGuid();
+                        int fileId = entries[entryIdx].fileId;
+                        if (!peerGuid.empty() && fileId >= 0) {
+                            dlHash = peerGuid + ":" + std::to_string(fileId);
+                            dlFilename = entries[entryIdx].name;
+                        }
+                    }
+                }
+                // Fall through to download outside lock
             }
-            return true;
+        } // lock released
+        if (core_ && !dlHash.empty()) {
+            core_->downloadFile(dlHash, dlFilename);
         }
+        return true;
     }
 
-    // Handle 'b' key for browse peer
-    if (event == Event::Character('b')) {
+    // Handle Ctrl+B for browse peer
+    if (event == Event::Character(CTRL_B)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         View view = state_.currentView();
 
@@ -1292,6 +1448,7 @@ bool App::handleGlobalEvent(Event event) {
                 state_.setBrowsePath("/");
                 state_.setSelectedBrowseIndex(0);
                 state_.browseEntries().clear();
+                state_.rawBrowseEntries().clear();
                 state_.setCurrentView(View::Browse);
                 // Request file listing from peer
                 if (core_) {
@@ -1308,22 +1465,13 @@ bool App::handleGlobalEvent(Event event) {
                 state_.setBrowsePath("/");
                 state_.setSelectedBrowseIndex(0);
                 state_.browseEntries().clear();
+                state_.rawBrowseEntries().clear();
                 state_.setCurrentView(View::Browse);
                 // Request file listing from peer
                 if (core_) {
                     core_->browsePeer(results[idx].user, "/");
                 }
             }
-            return true;
-        }
-    }
-
-    // Handle 'J' (shift+j) for join room in Chat
-    if (event == Event::Character('J')) {
-        std::lock_guard<std::mutex> lock(state_.mutex());
-        if (state_.currentView() == View::Chat) {
-            state_.setModalType("join_room");
-            state_.setShowModal(true);
             return true;
         }
     }
@@ -1377,6 +1525,37 @@ bool App::handleGlobalEvent(Event event) {
                     int port = std::atoi(settingsEditBuffer_.c_str());
                     if (port > 0 && port < 65536) {
                         state_.setListenPort(port);
+                        if (core_) {
+                            core_->setListenPort(port);
+                            core_->saveConfig();
+                        }
+                    }
+                } else if (state_.settingsSection() == SettingsSection::Identity && selectedSettingsItem_ == 1) {
+                    // Network name
+                    state_.setNetworkHash(settingsEditBuffer_);
+                    if (core_) {
+                        core_->setNetworkName(settingsEditBuffer_);
+                        core_->saveConfig();
+                    }
+                } else if (state_.settingsSection() == SettingsSection::Network && selectedSettingsItem_ == 1) {
+                    // Upload limit value
+                    int val = std::atoi(settingsEditBuffer_.c_str());
+                    if (val > 0) {
+                        state_.setUploadLimitKBps(val);
+                        if (core_) {
+                            core_->setThrottleUpload(state_.limitUpload(), val);
+                            core_->saveConfig();
+                        }
+                    }
+                } else if (state_.settingsSection() == SettingsSection::Network && selectedSettingsItem_ == 2) {
+                    // Download limit value
+                    int val = std::atoi(settingsEditBuffer_.c_str());
+                    if (val > 0) {
+                        state_.setDownloadLimitKBps(val);
+                        if (core_) {
+                            core_->setThrottleDownload(state_.limitDownload(), val);
+                            core_->saveConfig();
+                        }
                     }
                 }
                 settingsEditMode_ = false;
@@ -1389,6 +1568,15 @@ bool App::handleGlobalEvent(Event event) {
                 } else if (state_.settingsSection() == SettingsSection::Network && selectedSettingsItem_ == 0) {
                     settingsEditMode_ = true;
                     settingsEditBuffer_ = std::to_string(state_.listenPort());
+                } else if (state_.settingsSection() == SettingsSection::Identity && selectedSettingsItem_ == 1) {
+                    settingsEditMode_ = true;
+                    settingsEditBuffer_ = state_.networkHash();
+                } else if (state_.settingsSection() == SettingsSection::Network && selectedSettingsItem_ == 1 && state_.limitUpload()) {
+                    settingsEditMode_ = true;
+                    settingsEditBuffer_ = std::to_string(state_.uploadLimitKBps());
+                } else if (state_.settingsSection() == SettingsSection::Network && selectedSettingsItem_ == 2 && state_.limitDownload()) {
+                    settingsEditMode_ = true;
+                    settingsEditBuffer_ = std::to_string(state_.downloadLimitKBps());
                 }
             }
             return true;
@@ -1401,9 +1589,33 @@ bool App::handleGlobalEvent(Event event) {
         if (state_.currentView() == View::Settings && settingsFocusContent_) {
             if (state_.settingsSection() == SettingsSection::Network) {
                 switch (selectedSettingsItem_) {
-                    case 2: state_.setLimitUpload(!state_.limitUpload()); break;
-                    case 3: state_.setLimitDownload(!state_.limitDownload()); break;
-                    case 4: state_.setAcceptIncoming(!state_.acceptIncoming()); break;
+                    case 1: {
+                        bool newVal = !state_.limitUpload();
+                        state_.setLimitUpload(newVal);
+                        if (core_) {
+                            core_->setThrottleUpload(newVal, state_.uploadLimitKBps());
+                            core_->saveConfig();
+                        }
+                        break;
+                    }
+                    case 2: {
+                        bool newVal = !state_.limitDownload();
+                        state_.setLimitDownload(newVal);
+                        if (core_) {
+                            core_->setThrottleDownload(newVal, state_.downloadLimitKBps());
+                            core_->saveConfig();
+                        }
+                        break;
+                    }
+                    case 3: {
+                        bool newVal = !state_.acceptIncoming();
+                        state_.setAcceptIncoming(newVal);
+                        if (core_) {
+                            core_->setAcceptIncoming(newVal);
+                            core_->saveConfig();
+                        }
+                        break;
+                    }
                 }
                 return true;
             }
@@ -1439,8 +1651,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Settings: 's' to save config
-    if (event == Event::Character('s')) {
+    // Settings: Ctrl+S to save config
+    if (event == Event::Character(CTRL_S)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Settings && core_) {
             core_->saveConfig();
@@ -1461,8 +1673,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'p' for pause transfer
-    if (event == Event::Character('p')) {
+    // Handle Ctrl+P for pause transfer
+    if (event == Event::Character(CTRL_P)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Transfers) {
             int idx = state_.selectedTransferIndex();
@@ -1475,12 +1687,18 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'r' for resume transfer or retry connection
-    if (event == Event::Character('r')) {
+    // Handle Ctrl+R for resume transfer, retry connection, or rescan
+    if (event == Event::Character(CTRL_R)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         View view = state_.currentView();
 
-        if (view == View::Transfers) {
+        if (view == View::Settings &&
+            state_.settingsSection() == SettingsSection::Sharing) {
+            if (core_) {
+                core_->rescanSharedDirectories();
+            }
+            return true;
+        } else if (view == View::Transfers) {
             int idx = state_.selectedTransferIndex();
             auto& transfers = state_.transfers();
             if (idx >= 0 && idx < (int)transfers.size() &&
@@ -1500,24 +1718,8 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle 'c' for cancel transfer
-    if (event == Event::Character('c')) {
-        std::lock_guard<std::mutex> lock(state_.mutex());
-        if (state_.currentView() == View::Transfers) {
-            int idx = state_.selectedTransferIndex();
-            auto& transfers = state_.transfers();
-            if (idx >= 0 && idx < (int)transfers.size()) {
-                transfers.erase(transfers.begin() + idx);
-                if (idx > 0 && idx >= (int)transfers.size()) {
-                    state_.setSelectedTransferIndex(idx - 1);
-                }
-            }
-            return true;
-        }
-    }
-
-    // Handle 'x' for clear completed transfers
-    if (event == Event::Character('x')) {
+    // Handle Ctrl+X for clear completed transfers
+    if (event == Event::Character(CTRL_X)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Transfers) {
             auto& transfers = state_.transfers();
@@ -1535,18 +1737,26 @@ bool App::handleGlobalEvent(Event event) {
         }
     }
 
-    // Handle Backspace for browse navigation (go up)
-    if (event == Event::Backspace) {
+    // Handle Backspace or 'h' for browse navigation (go up)
+    if (event == Event::Backspace ||
+        (event == Event::Character('h') && state_.currentView() == View::Browse)) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Browse && state_.browsePath() != "/") {
             std::string path = state_.browsePath();
             size_t pos = path.rfind('/');
+            std::string newPath;
             if (pos != std::string::npos && pos > 0) {
-                state_.setBrowsePath(path.substr(0, pos));
+                newPath = path.substr(0, pos);
             } else {
-                state_.setBrowsePath("/");
+                newPath = "/";
             }
+            state_.setBrowsePath(newPath);
             state_.setSelectedBrowseIndex(0);
+            state_.browseEntries().clear();
+            std::string peer = state_.browsePeer();
+            if (core_) {
+                core_->browsePeer(peer, newPath);
+            }
             return true;
         }
     }
@@ -1752,7 +1962,7 @@ Component App::buildNetworkView() {
                 filler(),
                 text("No connections") | dim | center,
                 text("") | center,
-                text("Press 'a' to add a connection") | dim | center,
+                text("Press Ctrl+A to add a connection") | dim | center,
                 filler()
             }) | flex | border;
         }
@@ -1797,7 +2007,7 @@ Component App::buildNetworkView() {
         auto& peers = state_.peers();
 
         // Always allow add
-        if (event == Event::Character('a')) {
+        if (event == Event::Character(CTRL_A)) {
             state_.setModalType("add_connection");
             state_.setShowModal(true);
             return true;
@@ -1827,7 +2037,7 @@ Component App::buildNetworkView() {
         }
 
         // Actions
-        if (event == Event::Character('d')) {
+        if (event == Event::Character(CTRL_D)) {
             if (idx >= 0 && idx < (int)peers.size()) {
                 disconnectPeerName_ = peers[idx].nickname.empty() ?
                     peers[idx].address : peers[idx].nickname;
@@ -1836,34 +2046,17 @@ Component App::buildNetworkView() {
             }
             return true;
         }
-        if (event == Event::Character('b')) {
-            if (idx >= 0 && idx < (int)peers.size() &&
-                peers[idx].status == ConnectionStatus::Online) {
-                state_.setPreviousView(View::Network);
-                state_.setBrowsePeer(peers[idx].nickname);
-                state_.setBrowsePath("/");
-                state_.setSelectedBrowseIndex(0);
-
-                // Demo browse entries
-                state_.browseEntries().clear();
-                state_.browseEntries().push_back({"Music", true, 0});
-                state_.browseEntries().push_back({"Documents", true, 0});
-                state_.browseEntries().push_back({"readme.txt", false, 1024});
-
-                state_.setCurrentView(View::Browse);
-                tabIndex_ = -1;  // Special: browse doesn't have tab
-            }
-            return true;
-        }
-        if (event == Event::Character('c')) {
+        // Note: Ctrl+B for browse is handled by handleGlobalEvent
+        if (event == Event::Character(CTRL_N)) {
             if (idx >= 0 && idx < (int)peers.size() &&
                 peers[idx].status == ConnectionStatus::Online) {
                 // Open or create DM
                 std::string nick = peers[idx].nickname;
+                std::string dmRoom = "@" + nick;
                 bool found = false;
                 for (size_t i = 0; i < state_.chatRooms().size(); ++i) {
                     if (state_.chatRooms()[i].isDirect &&
-                        state_.chatRooms()[i].name == nick) {
+                        state_.chatRooms()[i].name == dmRoom) {
                         state_.setSelectedRoomIndex(i);
                         found = true;
                         break;
@@ -1871,7 +2064,7 @@ Component App::buildNetworkView() {
                 }
                 if (!found) {
                     ChatRoom dm;
-                    dm.name = nick;
+                    dm.name = dmRoom;
                     dm.isDirect = true;
                     dm.unreadCount = 0;
                     state_.chatRooms().push_back(dm);
@@ -1882,7 +2075,7 @@ Component App::buildNetworkView() {
             }
             return true;
         }
-        if (event == Event::Character('r')) {
+        if (event == Event::Character(CTRL_R)) {
             // Retry failed connection
             if (idx >= 0 && idx < (int)peers.size() &&
                 peers[idx].status == ConnectionStatus::Failed) {
@@ -1938,7 +2131,7 @@ Component App::buildSearchView() {
                 text(state_.searchQuery().empty() ?
                     "Enter a search query above" : "No results found") | dim | center,
                 text("") | center,
-                text("Press '/' to focus search") | dim | center,
+                text("Press '/' or Ctrl+N to focus search") | dim | center,
                 filler()
             }) | flex | border;
         }
@@ -1996,11 +2189,24 @@ Component App::buildSearchView() {
             return true;  // Consume Enter
         }
 
+        // Escape cancels search and clears results
+        if (event == Event::Escape) {
+            if (core_) {
+                core_->cancelSearch();
+            }
+            {
+                std::lock_guard<std::mutex> lock(state_.mutex());
+                state_.searchResults().clear();
+                state_.setSelectedSearchIndex(0);
+            }
+            return true;
+        }
+
         std::lock_guard<std::mutex> lock(state_.mutex());
         auto& results = state_.searchResults();
 
         // Focus search input
-        if (event == Event::Character('/') || event == Event::Character('n')) {
+        if (event == Event::Character('/') || event == Event::Character(CTRL_N)) {
             return false;  // Let input handle it
         }
 
@@ -2027,8 +2233,8 @@ Component App::buildSearchView() {
             return true;
         }
 
-        // Download (use 'd' key, Enter is reserved for search input)
-        if (event == Event::Character('d')) {
+        // Download (use Ctrl+D, Enter is reserved for search input)
+        if (event == Event::Character(CTRL_D)) {
             fprintf(stderr, "[UI] 'd' pressed for download, idx=%d, results=%zu\n",
                 idx, results.size());
             state_.setModalType("download_confirm");
@@ -2036,18 +2242,7 @@ Component App::buildSearchView() {
             return true;
         }
 
-        // Browse user
-        if (event == Event::Character('b')) {
-            if (idx >= 0 && idx < (int)results.size()) {
-                state_.setPreviousView(View::Search);
-                state_.setBrowsePeer(results[idx].user);
-                state_.setBrowsePath("/");
-                state_.browseEntries().clear();
-                state_.setCurrentView(View::Browse);
-                tabIndex_ = -1;
-            }
-            return true;
-        }
+        // Note: 'b' for browse is handled by handleGlobalEvent
 
         return false;
     });
@@ -2185,7 +2380,7 @@ Component App::buildTransfersView() {
         }
 
         // Pause
-        if (event == Event::Character('p')) {
+        if (event == Event::Character(CTRL_P)) {
             if (idx >= 0 && idx < (int)transfers.size()) {
                 if (transfers[idx].status == TransferStatus::Active) {
                     transfers[idx].status = TransferStatus::Paused;
@@ -2195,7 +2390,7 @@ Component App::buildTransfersView() {
         }
 
         // Resume
-        if (event == Event::Character('r')) {
+        if (event == Event::Character(CTRL_R)) {
             if (idx >= 0 && idx < (int)transfers.size()) {
                 if (transfers[idx].status == TransferStatus::Paused) {
                     transfers[idx].status = TransferStatus::Active;
@@ -2205,7 +2400,7 @@ Component App::buildTransfersView() {
         }
 
         // Cancel
-        if (event == Event::Character('c')) {
+        if (event == Event::Character(CTRL_D)) {
             if (idx >= 0 && idx < (int)transfers.size()) {
                 transfers.erase(transfers.begin() + idx);
                 if (idx > maxIdx - 1) {
@@ -2216,7 +2411,7 @@ Component App::buildTransfersView() {
         }
 
         // Clear completed
-        if (event == Event::Character('x')) {
+        if (event == Event::Character(CTRL_X)) {
             transfers.erase(
                 std::remove_if(transfers.begin(), transfers.end(),
                     [](const TransferInfo& t) {
@@ -2315,14 +2510,17 @@ Component App::buildChatView() {
                     Element line;
                     if (msg.isSystem) {
                         // System messages: show content (join/leave/etc)
-                        line = text(oss.str() + msg.content) | dim;
+                        line = hbox({
+                            text(oss.str()),
+                            renderMessageContent(msg.content)
+                        }) | dim;
                     } else {
                         // Regular messages: show sender and content
                         std::string senderName = msg.sender.empty() ? "anon" : msg.sender;
                         line = hbox({
                             text(oss.str()) | dim,
                             text(senderName + ": ") | bold | color(Color::Cyan),
-                            text(msg.content)
+                            renderMessageContent(msg.content)
                         });
                     }
                     messages.push_back(line);
@@ -2389,45 +2587,46 @@ Component App::buildChatView() {
             return true;
         }
 
-        std::lock_guard<std::mutex> lock(state_.mutex());
+        // Room navigation — arrow keys always work (no j/k in Chat)
+        if (event == Event::ArrowUp) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            int idx = state_.selectedRoomIndex();
+            if (idx > 0) state_.setSelectedRoomIndex(idx - 1);
+            return true;
+        }
+        if (event == Event::ArrowDown) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            int idx = state_.selectedRoomIndex();
+            if (idx < (int)state_.chatRooms().size() - 1)
+                state_.setSelectedRoomIndex(idx + 1);
+            return true;
+        }
 
-        // Room navigation (when not typing)
-        if (state_.chatInput().empty()) {
-            if (event == Event::ArrowUp || event == Event::Character('k')) {
-                int idx = state_.selectedRoomIndex();
-                if (idx > 0) {
-                    state_.setSelectedRoomIndex(idx - 1);
-                }
-                return true;
-            }
-            if (event == Event::ArrowDown || event == Event::Character('j')) {
-                int idx = state_.selectedRoomIndex();
-                if (idx < (int)state_.chatRooms().size() - 1) {
-                    state_.setSelectedRoomIndex(idx + 1);
-                }
-                return true;
-            }
+        // Ctrl+O: Join room
+        if (event == Event::Character(CTRL_O)) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            state_.setModalType("join_room");
+            state_.setShowModal(true);
+            return true;
+        }
 
-            // Join room
-            if (event == Event::Character('J') ||
-                (event == Event::Character('j') && state_.chatInput().empty())) {
-                // Only 'J' to avoid conflict with navigation
-                if (event == Event::Character('J')) {
-                    state_.setModalType("join_room");
-                    state_.setShowModal(true);
-                    return true;
-                }
-            }
+        // Ctrl+N: Start DM
+        if (event == Event::Character(CTRL_N)) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            state_.setModalType("start_dm");
+            state_.setShowModal(true);
+            return true;
+        }
 
-            // Leave room
-            if (event == Event::Character('l')) {
-                int idx = state_.selectedRoomIndex();
-                if (idx > 0 && idx < (int)state_.chatRooms().size()) {
-                    state_.chatRooms().erase(state_.chatRooms().begin() + idx);
-                    state_.setSelectedRoomIndex(std::max(0, idx - 1));
-                }
-                return true;
+        // Ctrl+L: Leave room
+        if (event == Event::Character(CTRL_L)) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            int idx = state_.selectedRoomIndex();
+            if (idx > 0 && idx < (int)state_.chatRooms().size()) {
+                state_.chatRooms().erase(state_.chatRooms().begin() + idx);
+                state_.setSelectedRoomIndex(std::max(0, idx - 1));
             }
+            return true;
         }
 
         return false;
@@ -2480,116 +2679,41 @@ Component App::buildBrowseView() {
             table | flex
         }) | flex | border;
     }) | CatchEvent([this](Event event) {
-        std::lock_guard<std::mutex> lock(state_.mutex());
-        auto& entries = state_.browseEntries();
+        // Note: Enter, 'd', Escape, Backspace, j/k, arrow keys are all handled
+        // by handleGlobalEvent. This CatchEvent handles 'l' (right arrow alias)
+        // for entering directories as a vim-like navigation alternative.
+        if (event == Event::Character('l')) {
+            std::lock_guard<std::mutex> lock(state_.mutex());
+            auto& entries = state_.browseEntries();
+            int offset = (state_.browsePath() != "/") ? 1 : 0;
+            int idx = state_.selectedBrowseIndex();
+            std::string peer = state_.browsePeer();
 
-        int offset = (state_.browsePath() != "/") ? 1 : 0;  // Account for ".."
-        int totalItems = entries.size() + offset;
-        if (totalItems == 0) return false;
-
-        int idx = state_.selectedBrowseIndex();
-        int maxIdx = totalItems - 1;
-
-        // Navigation
-        if (event == Event::ArrowUp || event == Event::Character('k')) {
-            state_.setSelectedBrowseIndex(std::max(0, idx - 1));
-            return true;
-        }
-        if (event == Event::ArrowDown || event == Event::Character('j')) {
-            state_.setSelectedBrowseIndex(std::min(maxIdx, idx + 1));
-            return true;
-        }
-
-        // Go up
-        if (event == Event::Backspace || event == Event::Character('h')) {
-            if (state_.browsePath() != "/") {
+            // ".." selected - go up
+            if (offset > 0 && idx == 0) {
                 std::string path = state_.browsePath();
                 size_t pos = path.rfind('/');
-                std::string newPath;
-                if (pos != std::string::npos && pos > 0) {
-                    newPath = path.substr(0, pos);
-                } else {
-                    newPath = "/";
-                }
+                std::string newPath = (pos != std::string::npos && pos > 0) ?
+                    path.substr(0, pos) : "/";
                 state_.setBrowsePath(newPath);
                 state_.setSelectedBrowseIndex(0);
                 state_.browseEntries().clear();
-                // Fetch new directory listing
-                std::string peer = state_.browsePeer();
-                if (core_) {
-                    core_->browsePeer(peer, newPath);
-                }
-            }
-            return true;
-        }
-
-        // Enter directory or download file
-        if (event == Event::Return) {
-            if (idx == 0 && offset == 1) {
-                // ".." selected - go up
-                std::string path = state_.browsePath();
-                size_t pos = path.rfind('/');
-                std::string newPath;
-                if (pos != std::string::npos && pos > 0) {
-                    newPath = path.substr(0, pos);
-                } else {
-                    newPath = "/";
-                }
-                state_.setBrowsePath(newPath);
-                state_.setSelectedBrowseIndex(0);
-                state_.browseEntries().clear();
-                // Fetch new directory listing
-                std::string peer = state_.browsePeer();
                 if (core_) {
                     core_->browsePeer(peer, newPath);
                 }
             } else {
                 int entryIdx = idx - offset;
-                if (entryIdx >= 0 && entryIdx < (int)entries.size()) {
-                    if (entries[entryIdx].isDirectory) {
-                        std::string newPath = state_.browsePath();
-                        if (newPath != "/") newPath += "/";
-                        newPath += entries[entryIdx].name;
-                        state_.setBrowsePath(newPath);
-                        state_.setSelectedBrowseIndex(0);
-                        state_.browseEntries().clear();
-                        // Fetch new directory listing
-                        std::string peer = state_.browsePeer();
-                        if (core_) {
-                            core_->browsePeer(peer, newPath);
-                        }
-                    } else {
-                        // Download file
-                        TransferInfo xfer;
-                        xfer.id = state_.transfers().size() + 1;
-                        xfer.filename = entries[entryIdx].name;
-                        xfer.direction = TransferDirection::Download;
-                        xfer.status = TransferStatus::Active;
-                        xfer.totalSize = entries[entryIdx].size;
-                        xfer.transferred = 0;
-                        xfer.speedKBps = 0;
-                        xfer.peer = state_.browsePeer();
-                        state_.transfers().push_back(xfer);
+                if (entryIdx >= 0 && entryIdx < (int)entries.size() && entries[entryIdx].isDirectory) {
+                    std::string newPath = state_.browsePath();
+                    if (newPath != "/") newPath += "/";
+                    newPath += entries[entryIdx].name;
+                    state_.setBrowsePath(newPath);
+                    state_.setSelectedBrowseIndex(0);
+                    state_.browseEntries().clear();
+                    if (core_) {
+                        core_->browsePeer(peer, newPath);
                     }
                 }
-            }
-            return true;
-        }
-
-        // Download selected
-        if (event == Event::Character('d')) {
-            int entryIdx = idx - offset;
-            if (entryIdx >= 0 && entryIdx < (int)entries.size() && !entries[entryIdx].isDirectory) {
-                TransferInfo xfer;
-                xfer.id = state_.transfers().size() + 1;
-                xfer.filename = entries[entryIdx].name;
-                xfer.direction = TransferDirection::Download;
-                xfer.status = TransferStatus::Active;
-                xfer.totalSize = entries[entryIdx].size;
-                xfer.transferred = 0;
-                xfer.speedKBps = 0;
-                xfer.peer = state_.browsePeer();
-                state_.transfers().push_back(xfer);
             }
             return true;
         }
@@ -2736,39 +2860,41 @@ Component App::buildSettingsView() {
                     text(portVal) | border
                 })));
 
-                // Field 1: Max Connections
-                content.push_back(fieldStyle(1, hbox({
-                    text("  Max Connections:  "),
-                    text(std::to_string(state_.maxConnections())) | border
-                })));
-
                 content.push_back(text(""));
                 content.push_back(text("  Bandwidth Limits") | dim);
 
-                // Field 2: Limit upload checkbox
-                content.push_back(fieldStyle(2, hbox({
-                    text(state_.limitUpload() ? "  [x] " : "  [ ] "),
-                    text("Limit upload    "),
-                    text(std::to_string(state_.uploadLimitKBps()) + " KB/s") | border
-                })));
+                // Field 1: Limit upload checkbox + value
+                {
+                    std::string ulVal = settingsEditMode_ && selectedSettingsItem_ == 1 && state_.limitUpload() ?
+                        settingsEditBuffer_ + "▏ KB/s" : std::to_string(state_.uploadLimitKBps()) + " KB/s";
+                    content.push_back(fieldStyle(1, hbox({
+                        text(state_.limitUpload() ? "  [x] " : "  [ ] "),
+                        text("Limit upload    "),
+                        text(ulVal) | border
+                    })));
+                }
 
-                // Field 3: Limit download checkbox
+                // Field 2: Limit download checkbox + value
+                {
+                    std::string dlVal = settingsEditMode_ && selectedSettingsItem_ == 2 && state_.limitDownload() ?
+                        settingsEditBuffer_ + "▏ KB/s" : std::to_string(state_.downloadLimitKBps()) + " KB/s";
+                    content.push_back(fieldStyle(2, hbox({
+                        text(state_.limitDownload() ? "  [x] " : "  [ ] "),
+                        text("Limit download  "),
+                        text(dlVal) | border
+                    })));
+                }
+
+                content.push_back(text(""));
+
+                // Field 3: Accept incoming checkbox
                 content.push_back(fieldStyle(3, hbox({
-                    text(state_.limitDownload() ? "  [x] " : "  [ ] "),
-                    text("Limit download  "),
-                    text(std::to_string(state_.downloadLimitKBps()) + " KB/s") | border
-                })));
-
-                content.push_back(text(""));
-
-                // Field 4: Accept incoming checkbox
-                content.push_back(fieldStyle(4, hbox({
                     text(state_.acceptIncoming() ? "  [x] " : "  [ ] "),
-                    text("Accept incoming connections")
+                    text("Accept file requests")
                 })));
 
                 content.push_back(text(""));
-                content.push_back(text("  →/l to edit, Space to toggle, s to save") | dim);
+                content.push_back(text("  Enter: edit, Space: toggle, s: save") | dim);
                 break;
             }
 
@@ -2821,6 +2947,15 @@ Component App::buildSettingsView() {
                 content.push_back(fieldStyle(0, hbox({
                     text("  Nickname:  "),
                     text(nickVal) | border
+                })));
+
+                // Field 1: Network Name
+                std::string netVal = settingsEditMode_ && selectedSettingsItem_ == 1 ?
+                    settingsEditBuffer_ + "▏" : state_.networkHash();
+                if (netVal.empty()) netVal = "(open network)";
+                content.push_back(fieldStyle(1, hbox({
+                    text("  Network:   "),
+                    text(netVal) | border
                 })));
 
                 content.push_back(text(""));
@@ -2948,6 +3083,12 @@ Component App::buildUI() {
             } else if (modalType == "join_room") {
                 modalOverlay = window(text(" Join Room "), vbox({
                     hbox({text("Room: "), text(modalRoomInput_.empty() ? " " : modalRoomInput_) | inverted | flex | border}),
+                    separator(),
+                    hbox({filler(), text(" [Enter] OK  [Esc] Cancel ") | dim, filler()})
+                })) | size(WIDTH, GREATER_THAN, 40) | clear_under | center;
+            } else if (modalType == "start_dm") {
+                modalOverlay = window(text(" Direct Message "), vbox({
+                    hbox({text("Peer: "), text(modalDmPeerInput_.empty() ? " " : modalDmPeerInput_) | inverted | flex | border}),
                     separator(),
                     hbox({filler(), text(" [Enter] OK  [Esc] Cancel ") | dim, filler()})
                 })) | size(WIDTH, GREATER_THAN, 40) | clear_under | center;
