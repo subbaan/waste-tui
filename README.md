@@ -22,7 +22,7 @@ This project revives WASTE with a modern Linux TUI client built using [FTXUI](ht
 
 ## Current Status
 
-**Version**: 1.9.2
+**Version**: 1.10.1
 
 ### Working
 - Peer connections via encrypted WASTE protocol
@@ -33,6 +33,7 @@ This project revives WASTE with a modern Linux TUI client built using [FTXUI](ht
 - Key management (generate, import, export keys)
 - Local and remote file search
 - File database scanning and sharing
+- 12 color themes with live preview (see [Themes](#themes))
 
 ### Limitations
 - Multiple simultaneous transfers may have issues
@@ -127,28 +128,56 @@ To add peers, use the Network view (F1) and press **a** to add a peer address.
 
 **Global:**
 - `F1`-`F6` - Switch views (Network, Search, Transfers, Chat, Keys, Settings)
-- `F10` / `Ctrl+D` - Quit
+- `F10` / `Ctrl+Q` - Quit
 - `Esc` - Cancel/back
+- `?` / `F7` - Toggle help overlay
 
 **Navigation:**
 - `↑`/`↓` or `j`/`k` - Navigate lists
 - `Enter` - Select/confirm
-- `a` - Add item
-- `d` - Delete item
-- `?` - Help
+- `Ctrl+A` - Add item (connection, directory)
+- `Ctrl+D` - Delete/disconnect/download
 
 **Chat view:**
 - `Enter` - Send message
-- `↑`/`↓` or `j`/`k` - Navigate rooms (when input empty)
-- `J` - Join a channel
-- `d` - Start a direct message
-- `l` - Leave room
+- `↑`/`↓` - Navigate rooms
+- `Tab`/`Shift+Tab` - Cycle rooms
+- `Ctrl+O` - Join a channel
+- `Ctrl+N` - Start a direct message
+- `Ctrl+L` - Leave room
 
 **Keys view:**
 - `Tab` - Switch between trusted/pending tabs
-- `t` - Trust selected key
-- `e` - Export your public key
-- `i` - Import key file
+- `Ctrl+T` - Trust selected key
+- `Ctrl+E` - Export your public key
+- `Ctrl+F` - Import key file
+
+**Settings view:**
+- `←`/`→` or `h`/`l` - Switch between section list and content
+- `Enter` - Edit field / select theme
+- `Space` - Toggle checkbox / select theme
+- `Ctrl+S` - Save config
+
+## Themes
+
+WASTE TUI includes 12 built-in color themes. Each theme sets the full palette including background, foreground, and all accent colors.
+
+| Theme | Description |
+|-------|-------------|
+| Default | ANSI terminal colors (inherits your terminal's background) |
+| Dracula | Purple-tinted dark theme |
+| Gruvbox Dark | Warm retro palette |
+| Nord | Cool arctic tones |
+| Solarized Dark | Blue-teal dark theme |
+| Monokai | Classic editor dark |
+| Catppuccin | Pastel dark (Mocha variant) |
+| Tokyo Night | Deep indigo tones |
+| One Dark | Atom editor's signature theme |
+| Everforest | Muted nature-inspired greens |
+| Kanagawa | Japanese wave inspired |
+| Rose Pine | Soft purple-pink dark theme |
+
+To change theme: **F6** (Settings) → **Interface** → navigate with **↑/↓** → **Enter** or **Space** to select. The theme applies instantly and persists across restarts.
 
 ## Architecture
 
