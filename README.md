@@ -1,7 +1,7 @@
 # WASTE TUI
 
 A modern terminal user interface for WASTE, the encrypted peer-to-peer file sharing and chat application originally created by Nullsoft in 2003.
-This is an AI coded rewrite and an ongoing project, the client is working but you may encounter problems and is an ongoing project.
+This is an AI coded rewrite and an ongoing project, the client is working but you may encounter problems.
 
 ![Network View](images/network.png)
 
@@ -209,5 +209,6 @@ GPL v2 - See [LICENSE](LICENSE) for details.
 
 Original WASTE code: Copyright (C) 2003 Nullsoft, Inc.
 TUI client and Linux fixes: Copyright (C) 2024-2026 Contributors
+
 
 
