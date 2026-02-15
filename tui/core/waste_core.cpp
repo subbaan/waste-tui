@@ -2413,6 +2413,16 @@ std::string WasteCore::getNetworkName() const {
     return networkName_;
 }
 
+void WasteCore::setThemeName(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    themeName_ = name;
+}
+
+std::string WasteCore::getThemeName() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return themeName_;
+}
+
 void WasteCore::setAcceptIncoming(bool accept) {
     std::lock_guard<std::mutex> lock(mutex_);
     // Bit 1 of g_accept_downloads controls responding to file requests
@@ -2528,6 +2538,12 @@ bool WasteCore::loadConfig(const std::string& configDir) {
     g_throttle_send = cfg.ReadInt((char*)"throttlesend", 128);
     g_throttle_recv = cfg.ReadInt((char*)"throttlerecv", 128);
 
+    // Load theme
+    char* themeStr = cfg.ReadString((char*)"theme", (char*)"Default");
+    if (themeStr && themeStr[0]) {
+        themeName_ = themeStr;
+    }
+
     // Load shared directories (semicolon-separated)
     char* sharedDirsStr = cfg.ReadString((char*)"shared_dirs", (char*)"");
     if (sharedDirsStr && sharedDirsStr[0]) {
@@ -2579,6 +2595,7 @@ bool WasteCore::saveConfig() {
         sharedDirsStr += impl_->sharedDirs[i];
     }
     cfg.WriteString((char*)"shared_dirs", (char*)sharedDirsStr.c_str());
+    cfg.WriteString((char*)"theme", (char*)themeName_.c_str());
 
     cfg.Flush();
 

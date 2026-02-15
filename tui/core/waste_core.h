@@ -91,6 +91,8 @@ public:
     std::string getNetworkName() const;
     void setAcceptIncoming(bool accept);
     bool getAcceptIncoming() const;
+    void setThemeName(const std::string& name);
+    std::string getThemeName() const;
     void setThrottleUpload(bool enabled, int kbps);
     void setThrottleDownload(bool enabled, int kbps);
     bool getThrottleUploadEnabled() const;
@@ -145,6 +147,7 @@ private:
     std::string configDir_;
     std::string nickname_;
     std::string networkName_;
+    std::string themeName_ = "Default";
     int listenPort_{4001};
 
     // Prevent copying

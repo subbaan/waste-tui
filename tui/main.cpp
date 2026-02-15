@@ -142,11 +142,11 @@ int main(int argc, char* argv[]) {
             demoMode = true;
         }
         if (std::strcmp(argv[i], "--version") == 0 || std::strcmp(argv[i], "-v") == 0) {
-            std::cout << "waste-tui v1.10.0\n";
+            std::cout << "waste-tui v1.10.1\n";
             return 0;
         }
         if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
-            std::cout << "WASTE TUI v1.10.0 - Terminal User Interface for WASTE P2P\n\n";
+            std::cout << "WASTE TUI v1.10.1 - Terminal User Interface for WASTE P2P\n\n";
             std::cout << "Usage: waste-tui [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  -v, --version  Show version\n";

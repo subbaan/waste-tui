@@ -76,7 +76,7 @@ public:
 
                 // Selection indicator
                 if ((int)i == *selected_) {
-                    cells.push_back(text("▸ ") | color(Color::Cyan));
+                    cells.push_back(text("▸ ") | color(options_.accentColor));
                 } else {
                     cells.push_back(text("  "));
                 }
@@ -190,7 +190,8 @@ Element TableElement(
     const std::vector<std::vector<std::string>>& rows,
     const std::vector<TableColumn>& columns,
     int selected,
-    bool showHeader
+    bool showHeader,
+    Color accentColor
 ) {
     Elements rowElements;
 
@@ -220,7 +221,7 @@ Element TableElement(
 
         // Selection indicator
         if ((int)i == selected) {
-            cells.push_back(text("▸ ") | color(Color::Cyan));
+            cells.push_back(text("▸ ") | color(accentColor));
         } else {
             cells.push_back(text("  "));
         }

@@ -1,4 +1,5 @@
 #include "app.h"
+#include "theme.h"
 #include "components/table.h"
 #include "components/scrolltext.h"
 #include "components/modal.h"
@@ -104,7 +105,7 @@ std::string transferStatusStr(TransferStatus status) {
 
 // Render message content with clickable URLs
 // Detects http://, https://, ftp://, and www. prefixes
-Element renderMessageContent(const std::string& content) {
+Element renderMessageContent(const std::string& content, Color linkColor = Color::Blue) {
     Elements parts;
     size_t pos = 0;
     size_t len = content.length();
@@ -158,7 +159,7 @@ Element renderMessageContent(const std::string& content) {
         }
 
         parts.push_back(
-            text(url) | underlined | color(Color::Blue) | hyperlink(linkUrl)
+            text(url) | underlined | color(linkColor) | hyperlink(linkUrl)
         );
 
         pos = urlEnd;
@@ -236,6 +237,9 @@ bool App::initializeCore() {
             sd.scanning = true;
             state_.sharedDirs().push_back(sd);
         }
+
+        // Sync theme
+        state_.setThemeIndex(findThemeIndex(core_->getThemeName()));
     }
 
     // Set up callbacks before initializing
@@ -543,29 +547,34 @@ Element App::buildStatusBar() {
         totalUnread += room.unreadCount;
     }
 
+    const auto& t = state_.theme();
+
     Elements statusItems = {
-        text(" WASTE v1.9.8 ") | bold | color(Color::Cyan),
+        text(" WASTE v1.10.1 ") | bold | color(t.accent),
         separator(),
         text(" Net: " + std::to_string(stats.connectedPeers) + " peers "),
         separator(),
-        text(" ↑ " + formatSpeed(stats.uploadKBps) + " ") | color(Color::Green),
+        text(" ↑ " + formatSpeed(stats.uploadKBps) + " ") | color(t.success),
         separator(),
-        text(" ↓ " + formatSpeed(stats.downloadKBps) + " ") | color(Color::Yellow),
+        text(" ↓ " + formatSpeed(stats.downloadKBps) + " ") | color(t.warning),
     };
 
     if (totalUnread > 0) {
         statusItems.push_back(separator());
-        statusItems.push_back(text(" ✉ " + std::to_string(totalUnread) + " ") | color(Color::Magenta) | bold);
+        statusItems.push_back(text(" ✉ " + std::to_string(totalUnread) + " ") | color(t.notification) | bold);
     }
 
     statusItems.push_back(separator());
     statusItems.push_back(filler());
     statusItems.push_back(text(" " + formatTime() + " "));
 
-    return hbox(statusItems) | bgcolor(Color::GrayDark);
+    return hbox(statusItems) | bgcolor(t.bgDark);
 }
 
 Element App::buildTabBar() {
+    std::lock_guard<std::mutex> lock(state_.mutex());
+    const auto& t = state_.theme();
+
     std::vector<std::string> tabNames = {
         "F1 Network", "F2 Search", "F3 Transfers", "F4 Chat", "F5 Keys", "F6 Settings"
     };
@@ -574,7 +583,7 @@ Element App::buildTabBar() {
     for (size_t i = 0; i < tabNames.size(); ++i) {
         auto tabText = text(" " + tabNames[i] + " ");
         if ((int)i == tabIndex_) {
-            tabText = tabText | bold | bgcolor(Color::Blue) | color(Color::White);
+            tabText = tabText | bold | bgcolor(t.primary) | color(t.primaryFg);
         } else {
             tabText = tabText | dim;
         }
@@ -616,11 +625,12 @@ Element App::buildFooter() {
         }
     }
 
+    const auto& t = state_.theme();
     return hbox({
         text(" " + hints + " ") | dim,
         filler(),
         text(" ^Q:Quit ") | dim
-    }) | bgcolor(Color::GrayDark);
+    }) | bgcolor(t.bgDark);
 }
 
 Element App::buildHelpOverlay() {
@@ -1127,7 +1137,7 @@ bool App::handleGlobalEvent(Event event) {
                     case SettingsSection::Network: maxItems = 4; break;
                     case SettingsSection::Sharing: maxItems = (int)state_.sharedDirs().size(); break;
                     case SettingsSection::Identity: maxItems = 2; break;
-                    case SettingsSection::Interface: maxItems = 0; break;
+                    case SettingsSection::Interface: maxItems = (int)builtinThemes().size(); break;
                 }
                 if (selectedSettingsItem_ < maxItems - 1) {
                     selectedSettingsItem_++;
@@ -1560,6 +1570,16 @@ bool App::handleGlobalEvent(Event event) {
                 }
                 settingsEditMode_ = false;
                 settingsEditBuffer_.clear();
+            } else if (state_.settingsSection() == SettingsSection::Interface) {
+                // Select theme from list
+                int idx = selectedSettingsItem_;
+                if (idx >= 0 && idx < (int)builtinThemes().size()) {
+                    state_.setThemeIndex(idx);
+                    if (core_) {
+                        core_->setThemeName(state_.theme().name);
+                        core_->saveConfig();
+                    }
+                }
             } else {
                 // Start editing
                 if (state_.settingsSection() == SettingsSection::Identity && selectedSettingsItem_ == 0) {
@@ -1587,7 +1607,17 @@ bool App::handleGlobalEvent(Event event) {
     if (event == Event::Character(' ')) {
         std::lock_guard<std::mutex> lock(state_.mutex());
         if (state_.currentView() == View::Settings && settingsFocusContent_) {
-            if (state_.settingsSection() == SettingsSection::Network) {
+            if (state_.settingsSection() == SettingsSection::Interface) {
+                int idx = selectedSettingsItem_;
+                if (idx >= 0 && idx < (int)builtinThemes().size()) {
+                    state_.setThemeIndex(idx);
+                    if (core_) {
+                        core_->setThemeName(state_.theme().name);
+                        core_->saveConfig();
+                    }
+                }
+                return true;
+            } else if (state_.settingsSection() == SettingsSection::Network) {
                 switch (selectedSettingsItem_) {
                     case 1: {
                         bool newVal = !state_.limitUpload();
@@ -1995,7 +2025,7 @@ Component App::buildNetworkView() {
         };
 
         int selected = state_.selectedPeerIndex();
-        auto table = components::TableElement(rows, columns, selected);
+        auto table = components::TableElement(rows, columns, selected, true, state_.theme().accent);
 
         return vbox({
             text(" Network ") | bold,
@@ -2156,7 +2186,7 @@ Component App::buildSearchView() {
         };
 
         int selected = state_.selectedSearchIndex();
-        auto table = components::TableElement(rows, columns, selected);
+        auto table = components::TableElement(rows, columns, selected, true, state_.theme().accent);
 
         return vbox({
             text(" Search ") | bold,
@@ -2263,7 +2293,8 @@ Component App::buildTransfersView() {
             }
         }
 
-        auto renderTransfer = [this](const TransferInfo& xfer, bool selected) {
+        const auto& th = state_.theme();
+        auto renderTransfer = [&th](const TransferInfo& xfer, bool selected) {
             float progress = xfer.totalSize > 0 ?
                 (float)xfer.transferred / xfer.totalSize : 0.0f;
 
@@ -2272,23 +2303,23 @@ Component App::buildTransfersView() {
             switch (xfer.status) {
                 case TransferStatus::Active:
                     status = formatSpeed(xfer.speedKBps);
-                    statusColor = Color::Green;
+                    statusColor = th.success;
                     break;
                 case TransferStatus::Paused:
                     status = "PAUSED";
-                    statusColor = Color::Yellow;
+                    statusColor = th.warning;
                     break;
                 case TransferStatus::Queued:
                     status = "QUEUED";
-                    statusColor = Color::Blue;
+                    statusColor = th.primary;
                     break;
                 case TransferStatus::Completed:
                     status = "DONE";
-                    statusColor = Color::Green;
+                    statusColor = th.success;
                     break;
                 case TransferStatus::Failed:
                     status = "FAILED";
-                    statusColor = Color::Red;
+                    statusColor = th.error;
                     break;
             }
 
@@ -2304,7 +2335,7 @@ Component App::buildTransfersView() {
                 }),
                 hbox({
                     text("  "),
-                    gauge(progress) | flex | color(Color::Cyan),
+                    gauge(progress) | flex | color(th.accent),
                     text(" "),
                     text(std::to_string((int)(progress * 100)) + "%") | size(WIDTH, EQUAL, 4),
                     text(" "),
@@ -2315,7 +2346,7 @@ Component App::buildTransfersView() {
             });
 
             if (selected) {
-                entry = entry | bgcolor(Color::GrayDark);
+                entry = entry | bgcolor(th.bgDark);
             }
 
             return entry;
@@ -2442,6 +2473,8 @@ Component App::buildChatView() {
         roomList.push_back(text(" ROOMS") | bold | dim);
         roomList.push_back(separator());
 
+        const auto& th = state_.theme();
+
         int roomIdx = 0;
         for (size_t i = 0; i < state_.chatRooms().size(); ++i) {
             const auto& room = state_.chatRooms()[i];
@@ -2455,7 +2488,7 @@ Component App::buildChatView() {
             bool selected = (int)i == state_.selectedRoomIndex();
             auto roomLine = text((selected ? "▸" : " ") + label);
             if (selected) {
-                roomLine = roomLine | bold | color(Color::Cyan);
+                roomLine = roomLine | bold | color(th.accent);
             }
             if (room.unreadCount > 0) {
                 roomLine = roomLine | bold;
@@ -2479,7 +2512,7 @@ Component App::buildChatView() {
             bool selected = (int)i == state_.selectedRoomIndex();
             auto roomLine = text((selected ? "▸" : " ") + label);
             if (selected) {
-                roomLine = roomLine | bold | color(Color::Cyan);
+                roomLine = roomLine | bold | color(th.accent);
             }
             if (room.unreadCount > 0) {
                 roomLine = roomLine | bold;
@@ -2512,15 +2545,15 @@ Component App::buildChatView() {
                         // System messages: show content (join/leave/etc)
                         line = hbox({
                             text(oss.str()),
-                            renderMessageContent(msg.content)
+                            renderMessageContent(msg.content, th.primary)
                         }) | dim;
                     } else {
                         // Regular messages: show sender and content
                         std::string senderName = msg.sender.empty() ? "anon" : msg.sender;
                         line = hbox({
                             text(oss.str()) | dim,
-                            text(senderName + ": ") | bold | color(Color::Cyan),
-                            renderMessageContent(msg.content)
+                            text(senderName + ": ") | bold | color(th.accent),
+                            renderMessageContent(msg.content, th.primary)
                         });
                     }
                     messages.push_back(line);
@@ -2669,7 +2702,7 @@ Component App::buildBrowseView() {
         };
 
         int selected = state_.selectedBrowseIndex();
-        auto table = components::TableElement(rows, columns, selected);
+        auto table = components::TableElement(rows, columns, selected, true, state_.theme().accent);
 
         return vbox({
             text(" Browse: " + state_.browsePeer() + " ") | bold,
@@ -2739,17 +2772,19 @@ Component App::buildKeysView() {
         // Get current list
         const auto& currentList = showPending ? pendingKeys : trustedKeys;
 
+        const auto& th = state_.theme();
+
         // Header: Own identity
         std::string ownFingerprint = core_ ? core_->getPublicKeyHash() : "No key loaded";
         auto ownKeyBox = window(text(" Your Identity "), vbox({
-            hbox({text("Fingerprint: ") | bold, text(ownFingerprint) | color(Color::Cyan)}),
+            hbox({text("Fingerprint: ") | bold, text(ownFingerprint) | color(th.accent)}),
         })) | size(HEIGHT, EQUAL, 3);
 
         // Tab selector: Trusted vs Pending
         auto trustedTab = text(" Trusted ") | (showPending ? dim : bold);
         auto pendingTab = text(" Pending ") | (showPending ? bold : dim);
-        if (!showPending) trustedTab = trustedTab | bgcolor(Color::Blue) | color(Color::White);
-        else pendingTab = pendingTab | bgcolor(Color::Yellow) | color(Color::Black);
+        if (!showPending) trustedTab = trustedTab | bgcolor(th.primary) | color(th.primaryFg);
+        else pendingTab = pendingTab | bgcolor(th.warning) | color(th.contrastFg);
 
         auto tabRow = hbox({
             trustedTab | border,
@@ -2769,7 +2804,7 @@ Component App::buildKeysView() {
 
                 auto nameEl = text(key.name.empty() ? "(unknown)" : key.name);
                 auto fpEl = text(key.fingerprint) | dim;
-                auto bitsEl = text(bitsStr) | color(Color::Green);
+                auto bitsEl = text(bitsStr) | color(th.success);
 
                 auto row = hbox({
                     text("  "),
@@ -2781,7 +2816,7 @@ Component App::buildKeysView() {
                 });
 
                 if ((int)i == selectedIdx) {
-                    row = row | bgcolor(Color::Blue) | color(Color::White);
+                    row = row | bgcolor(th.primary) | color(th.primaryFg);
                 }
 
                 keyRows.push_back(row);
@@ -2822,6 +2857,8 @@ Component App::buildSettingsView() {
     return Renderer([this] {
         std::lock_guard<std::mutex> lock(state_.mutex());
 
+        const auto& th = state_.theme();
+
         std::vector<std::string> sections = {"Network", "Sharing", "Identity", "Interface"};
         Elements sectionList;
         sectionList.push_back(text(" SECTION") | bold | dim);
@@ -2832,16 +2869,16 @@ Component App::buildSettingsView() {
             if (i == (size_t)state_.settingsSection()) {
                 line = line | bold;
                 if (!settingsFocusContent_) {
-                    line = line | color(Color::Cyan);
+                    line = line | color(th.accent);
                 }
             }
             sectionList.push_back(line);
         }
 
         // Helper to highlight selected field
-        auto fieldStyle = [this](int fieldIdx, Element el) {
+        auto fieldStyle = [this, &th](int fieldIdx, Element el) {
             if (settingsFocusContent_ && selectedSettingsItem_ == fieldIdx) {
-                return el | bgcolor(Color::Blue) | color(Color::White);
+                return el | bgcolor(th.primary) | color(th.primaryFg);
             }
             return el;
         };
@@ -2917,7 +2954,7 @@ Component App::buildSettingsView() {
                             text(formatSize(dir.totalSize))
                         });
                         if (selected) {
-                            line = line | bgcolor(Color::Blue) | color(Color::White);
+                            line = line | bgcolor(th.primary) | color(th.primaryFg);
                         }
                         content.push_back(line);
                         idx++;
@@ -2960,7 +2997,7 @@ Component App::buildSettingsView() {
 
                 content.push_back(text(""));
                 content.push_back(text("  RSA Key") | dim);
-                content.push_back(text("  ● Key loaded (2048-bit)") | color(Color::Green));
+                content.push_back(text("  ● Key loaded (2048-bit)") | color(th.success));
                 content.push_back(text("  Fingerprint: 3A:F2:91:BC:44:D8:7E:...") | dim);
                 content.push_back(text(""));
                 content.push_back(hbox({
@@ -2976,15 +3013,72 @@ Component App::buildSettingsView() {
                 break;
             }
 
-            case SettingsSection::Interface:
+            case SettingsSection::Interface: {
                 content = {
                     text(" INTERFACE") | bold,
                     separator(),
-                    text("  Theme and display options") | dim,
+                    text("  Color Theme") | dim,
                     text(""),
-                    text("  (coming soon)") | dim
                 };
+
+                const auto& themes = builtinThemes();
+                Elements themeRows;
+                for (int i = 0; i < (int)themes.size(); ++i) {
+                    const auto& t = themes[i];
+                    bool isActive = (i == state_.themeIndex());
+                    bool isHighlighted = settingsFocusContent_ && (i == selectedSettingsItem_);
+
+                    // Radio indicator + name
+                    std::string indicator = isActive ? " ● " : " ○ ";
+                    auto nameEl = text(indicator + t.name);
+                    if (isActive) {
+                        nameEl = nameEl | bold;
+                    }
+
+                    // Color swatch
+                    auto swatch = hbox({
+                        text("  ") | bgcolor(t.accent),
+                        text(" "),
+                        text("  ") | bgcolor(t.primary),
+                        text(" "),
+                        text("  ") | bgcolor(t.success),
+                        text(" "),
+                        text("  ") | bgcolor(t.warning),
+                        text(" "),
+                        text("  ") | bgcolor(t.error),
+                        text(" "),
+                        text("  ") | bgcolor(t.notification),
+                    });
+
+                    auto row = hbox({
+                        nameEl | size(WIDTH, EQUAL, 20),
+                        text(" "),
+                        swatch,
+                    });
+
+                    if (isHighlighted) {
+                        row = row | bgcolor(th.primary) | color(th.primaryFg);
+                        if (!isActive) {
+                            row = row | focus;  // scroll to highlighted item
+                        }
+                    }
+                    if (isActive && !isHighlighted) {
+                        row = row | color(th.accent);
+                    }
+                    if (isActive) {
+                        row = row | focus;
+                    }
+
+                    themeRows.push_back(row);
+                }
+
+                content.push_back(
+                    vbox(themeRows) | vscroll_indicator | yframe | flex
+                );
+                content.push_back(text(""));
+                content.push_back(text("  Enter/Space: select theme") | dim);
                 break;
+            }
         }
 
         // Visual indicator of focus
@@ -2992,11 +3086,11 @@ Component App::buildSettingsView() {
         auto contentBox = vbox(content) | flex;
 
         if (!settingsFocusContent_) {
-            sectionBox = sectionBox | border | color(Color::Cyan);
+            sectionBox = sectionBox | border | color(th.accent);
             contentBox = contentBox | border | dim;
         } else {
             sectionBox = sectionBox | border | dim;
-            contentBox = contentBox | border | color(Color::Cyan);
+            contentBox = contentBox | border | color(th.accent);
         }
 
         return hbox({sectionBox, contentBox}) | flex;
@@ -3037,8 +3131,13 @@ Component App::buildUI() {
         bool showModal = false;
         std::string modalType;
         std::string modalInfo;
+        Color themeBg = Color::Default;
+        Color themeFg = Color::Default;
         {
             std::lock_guard<std::mutex> lock(state_.mutex());
+            const auto& th = state_.theme();
+            themeBg = th.bg;
+            themeFg = th.fg;
             showBrowse = (state_.currentView() == View::Browse);
             showModal = state_.showModal();
             if (showModal) {
@@ -3159,7 +3258,7 @@ Component App::buildUI() {
             buildTabBar(),
             mainContent | flex,
             buildFooter(),
-        });
+        }) | bgcolor(themeBg) | color(themeFg);
 
         // Layer modal and help on top using dbox (depth box)
         return dbox({

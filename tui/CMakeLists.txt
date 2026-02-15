@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.14)
 project(waste-tui
-    VERSION 1.10.0
+    VERSION 1.10.1
     DESCRIPTION "WASTE P2P Client - TUI Interface"
     LANGUAGES CXX C
 )
@@ -65,6 +65,7 @@ add_executable(waste-tui
     app.cpp
     state.cpp
     core/waste_core.cpp
+    theme.cpp
     components/table.cpp
     components/scrolltext.cpp
     components/modal.cpp

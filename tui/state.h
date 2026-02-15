@@ -7,6 +7,8 @@
 #include <functional>
 #include <chrono>
 
+#include "theme.h"
+
 namespace waste {
 
 // Connection status
@@ -193,6 +195,11 @@ public:
     void setShowPendingKeys(bool pending) { showPendingKeys_ = pending; }
     void setSelectedBrowseIndex(int idx) { selectedBrowseIndex_ = idx; }
 
+    // Theme
+    int themeIndex() const { return themeIndex_; }
+    void setThemeIndex(int idx) { themeIndex_ = idx; }
+    const ColorTheme& theme() const { return builtinThemes()[themeIndex_]; }
+
     // Settings
     SettingsSection settingsSection() const { return settingsSection_; }
     void setSettingsSection(SettingsSection section) { settingsSection_ = section; }
@@ -258,6 +265,9 @@ private:
     std::vector<BrowseEntry> browseEntries_;
     std::vector<BrowseEntry> rawBrowseEntries_;  // All entries with full paths from initial browse
     int selectedBrowseIndex_ = 0;
+
+    // Theme
+    int themeIndex_ = 0;
 
     // Settings
     SettingsSection settingsSection_ = SettingsSection::Network;

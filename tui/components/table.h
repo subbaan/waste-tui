@@ -22,6 +22,7 @@ struct TableOptions {
     std::vector<TableColumn> columns;
     bool showHeader = true;
     bool showBorder = true;
+    ftxui::Color accentColor = ftxui::Color::Cyan;
     std::function<void(int)> onSelect = nullptr;  // Called on Enter
     std::function<void(int)> onHighlight = nullptr;  // Called on selection change
 };
@@ -41,7 +42,8 @@ ftxui::Element TableElement(
     const std::vector<std::vector<std::string>>& rows,
     const std::vector<TableColumn>& columns,
     int selected = -1,
-    bool showHeader = true
+    bool showHeader = true,
+    ftxui::Color accentColor = ftxui::Color::Cyan
 );
 
 }  // namespace components
